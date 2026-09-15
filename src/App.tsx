@@ -478,7 +478,10 @@ function App() {
                 <input
                   autoFocus
                   maxLength={200}
-                  onChange={(event) => setDraft((current) => ({ ...current, title: event.currentTarget.value }))}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setDraft((current) => ({ ...current, title: value }));
+                  }}
                   placeholder="e.g. CPMS commands"
                   value={draft.title}
                 />
@@ -487,9 +490,10 @@ function App() {
               <label>
                 Type
                 <select
-                  onChange={(event) =>
-                    setDraft((current) => ({ ...current, noteType: event.currentTarget.value as NoteType }))
-                  }
+                  onChange={(event) => {
+                    const value = event.currentTarget.value as NoteType;
+                    setDraft((current) => ({ ...current, noteType: value }));
+                  }}
                   value={draft.noteType}
                 >
                   <option value="note">Note</option>
@@ -501,7 +505,10 @@ function App() {
               <label>
                 Content
                 <textarea
-                  onChange={(event) => setDraft((current) => ({ ...current, content: event.currentTarget.value }))}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setDraft((current) => ({ ...current, content: value }));
+                  }}
                   placeholder="Write or paste anything…"
                   rows={12}
                   value={draft.content}

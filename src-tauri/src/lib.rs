@@ -84,6 +84,14 @@ struct UpdateNoteInput {
 fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let app_data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
     fs::create_dir_all(&app_data_dir).map_err(|error| error.to_string())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&app_data_dir, fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+    }
+
     Ok(app_data_dir)
 }
 
@@ -273,7 +281,15 @@ fn ensure_local_master_key(app: &tauri::AppHandle, state: &AppState) -> Result<(
 
 fn open_database(app: &tauri::AppHandle) -> Result<Connection, String> {
     let path = database_path(app)?;
-    let connection = Connection::open(path).map_err(|error| error.to_string())?;
+    let connection = Connection::open(&path).map_err(|error| error.to_string())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| error.to_string())?;
+    }
+
     connection
         .busy_timeout(Duration::from_secs(3))
         .map_err(|error| error.to_string())?;
