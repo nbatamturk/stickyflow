@@ -1,0 +1,5 @@
+# Rust 1.90+ enables LLD by default on x86_64-unknown-linux-gnu.
+# Ubuntu 22.04 test systems have shown an LLD Bus error during Tauri linking.
+# Opt out for this target so Cargo falls back to the system linker (GNU ld/BFD).
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-Clinker-features=-lld"]
