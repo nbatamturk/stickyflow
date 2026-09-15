@@ -18,7 +18,7 @@ use std::{
     sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::Manager;
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -29,6 +29,7 @@ const KDF_SALT_LEN: usize = 16;
 #[derive(Default)]
 struct AppState {
     master_key: Mutex<Option<Zeroizing<Vec<u8>>>>,
+    sticky_restore_ids: Mutex<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -469,6 +470,7 @@ fn verify_password(
         };
 
         set_master_key(&state, master_key)?;
+        restore_sticky_windows(&app, &state)?;
         Ok(true)
     })();
 
@@ -477,8 +479,183 @@ fn verify_password(
 }
 
 #[tauri::command]
-fn lock_session(state: tauri::State<'_, AppState>) -> Result<(), String> {
+fn lock_session(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    // Remember exactly which sticky notes were open before locking.
+    let open_ids = capture_open_sticky_ids(&app)?;
+
+    {
+        let mut guard = state
+            .sticky_restore_ids
+            .lock()
+            .map_err(|_| "Sticky restore state is unavailable.")?;
+        *guard = open_ids;
+    }
+
+    // Never leave decrypted sticky-note windows visible while locked.
+    for (label, window) in app.webview_windows() {
+        if label.starts_with("sticky-") {
+            let _ = window.close();
+        }
+    }
+
     clear_master_key(&state)
+}
+
+
+fn sticky_window_label(id: &str) -> String {
+    format!("sticky-{}", id.replace('-', ""))
+}
+
+fn load_note_by_id(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    id: &str,
+) -> Result<Note, String> {
+    let key = current_master_key(state)?;
+    let connection = open_database(app)?;
+
+    let (
+        title_cipher,
+        content_cipher,
+        color,
+        note_type,
+        pinned,
+        created_at,
+        updated_at,
+    ): (Vec<u8>, Vec<u8>, String, String, i64, i64, i64) = connection
+        .query_row(
+            "SELECT title_cipher, content_cipher, color, note_type, pinned, created_at, updated_at
+             FROM notes
+             WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .map_err(|error| {
+            if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+                "Note not found.".to_string()
+            } else {
+                error.to_string()
+            }
+        })?;
+
+    Ok(Note {
+        id: id.to_string(),
+        title: decrypt_text(&key, &title_cipher)?,
+        content: decrypt_text(&key, &content_cipher)?,
+        color,
+        note_type,
+        pinned: pinned != 0,
+        created_at,
+        updated_at,
+    })
+}
+
+#[tauri::command]
+fn get_note(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Note, String> {
+    load_note_by_id(&app, &state, &id)
+}
+
+fn show_sticky_window(
+    app: &tauri::AppHandle,
+    note: &Note,
+) -> Result<(), String> {
+    let label = sticky_window_label(&note.id);
+
+    if let Some(window) = app.get_webview_window(&label) {
+        window.show().map_err(|error| error.to_string())?;
+        window
+            .set_always_on_top(true)
+            .map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    WebviewWindowBuilder::new(
+        app,
+        &label,
+        WebviewUrl::App(format!("?sticky={}", note.id).into()),
+    )
+    .title(&note.title)
+    .inner_size(360.0, 320.0)
+    .min_inner_size(260.0, 180.0)
+    .resizable(true)
+    .always_on_top(true)
+    .build()
+    .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+fn capture_open_sticky_ids(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
+    let connection = open_database(app)?;
+    let mut statement = connection
+        .prepare("SELECT id FROM notes")
+        .map_err(|error| error.to_string())?;
+
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+
+    let windows = app.webview_windows();
+    let mut open_ids = Vec::new();
+
+    for id in ids {
+        let id = id.map_err(|error| error.to_string())?;
+        if windows.contains_key(&sticky_window_label(&id)) {
+            open_ids.push(id);
+        }
+    }
+
+    Ok(open_ids)
+}
+
+fn restore_sticky_windows(
+    app: &tauri::AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    let ids = {
+        let mut guard = state
+            .sticky_restore_ids
+            .lock()
+            .map_err(|_| "Sticky restore state is unavailable.")?;
+
+        std::mem::take(&mut *guard)
+    };
+
+    for id in ids {
+        if let Ok(note) = load_note_by_id(app, state, &id) {
+            let _ = show_sticky_window(app, &note);
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn open_sticky_window(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let note = load_note_by_id(&app, &state, &id)?;
+    show_sticky_window(&app, &note)
 }
 
 #[tauri::command]
@@ -625,12 +802,18 @@ fn delete_note(
 ) -> Result<(), String> {
     let _key = current_master_key(&state)?;
     let connection = open_database(&app)?;
+    let window_label = sticky_window_label(&id);
+
     let affected = connection
-        .execute("DELETE FROM notes WHERE id = ?1", params![id])
+        .execute("DELETE FROM notes WHERE id = ?1", params![&id])
         .map_err(|error| error.to_string())?;
 
     if affected == 0 {
         return Err("Note not found.".into());
+    }
+
+    if let Some(window) = app.get_webview_window(&window_label) {
+        let _ = window.close();
     }
 
     Ok(())
@@ -648,6 +831,8 @@ pub fn run() {
             verify_password,
             lock_session,
             list_notes,
+            get_note,
+            open_sticky_window,
             create_note,
             update_note,
             delete_note

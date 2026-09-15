@@ -1,0 +1,95 @@
+:root {
+  --sticky-bg: #f5e8bb;
+  --sticky-border: rgba(45, 39, 24, 0.16);
+  --sticky-text: #29261e;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body:has(.sticky-shell) {
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+.sticky-shell {
+  min-height: 100vh;
+  padding: 16px;
+  background: var(--sticky-bg);
+  color: var(--sticky-text);
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.sticky-yellow {
+  --sticky-bg: #fff1a8;
+}
+
+.sticky-green {
+  --sticky-bg: #cef0c5;
+}
+
+.sticky-blue {
+  --sticky-bg: #cce8f7;
+}
+
+.sticky-pink {
+  --sticky-bg: #f4d0dc;
+}
+
+.sticky-sand {
+  --sticky-bg: #eee2c5;
+}
+
+.sticky-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--sticky-border);
+}
+
+.sticky-header span {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+.sticky-header h1 {
+  margin: 3px 0 0;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.sticky-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.sticky-actions button,
+.sticky-error button {
+  border: 1px solid var(--sticky-border);
+  border-radius: 8px;
+  padding: 5px 8px;
+  background: rgba(255, 255, 255, 0.3);
+  color: inherit;
+  cursor: pointer;
+}
+
+.sticky-content {
+  padding-top: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  user-select: text;
+}
+
+.sticky-error {
+  background: #f4d0d0;
+}

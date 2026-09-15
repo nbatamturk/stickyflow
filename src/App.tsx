@@ -196,6 +196,16 @@ function App() {
     setError("");
   }
 
+  async function openSticky(note: Note) {
+    setError("");
+
+    try {
+      await invoke("open_sticky_window", { id: note.id });
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
+  }
+
   async function saveNote(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -440,6 +450,9 @@ function App() {
                     <time>{formatDate(note.updatedAt)}</time>
                   </button>
                   <div className="note-actions">
+                    <button className="icon-button" onClick={() => void openSticky(note)} type="button">
+                      Sticky
+                    </button>
                     <button className="icon-button" onClick={() => void togglePinned(note)} type="button">
                       {note.pinned ? "Unpin" : "Pin"}
                     </button>
