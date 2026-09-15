@@ -19,6 +19,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_window_state::{AppHandleExt, StateFlags, WindowExt};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -29,7 +30,6 @@ const KDF_SALT_LEN: usize = 16;
 #[derive(Default)]
 struct AppState {
     master_key: Mutex<Option<Zeroizing<Vec<u8>>>>,
-    sticky_restore_ids: Mutex<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,7 +83,10 @@ struct UpdateNoteInput {
 }
 
 fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
     fs::create_dir_all(&app_data_dir).map_err(|error| error.to_string())?;
 
     #[cfg(unix)]
@@ -196,7 +199,9 @@ fn wrap_master_key(password: &str, master_key: &[u8]) -> Result<(String, String)
 
 fn unwrap_master_key(password: &str, salt_b64: &str, wrapped_b64: &str) -> Result<Vec<u8>, String> {
     let salt = BASE64.decode(salt_b64).map_err(|error| error.to_string())?;
-    let wrapped = BASE64.decode(wrapped_b64).map_err(|error| error.to_string())?;
+    let wrapped = BASE64
+        .decode(wrapped_b64)
+        .map_err(|error| error.to_string())?;
     let kek = derive_kek(password, &salt)?;
     let master_key = decrypt_bytes(&kek, &wrapped)?;
 
@@ -212,19 +217,28 @@ fn set_master_key(state: &AppState, master_key: Vec<u8>) -> Result<(), String> {
         return Err("Encryption key has an invalid length.".into());
     }
 
-    let mut guard = state.master_key.lock().map_err(|_| "Encryption state is unavailable.")?;
+    let mut guard = state
+        .master_key
+        .lock()
+        .map_err(|_| "Encryption state is unavailable.")?;
     *guard = Some(Zeroizing::new(master_key));
     Ok(())
 }
 
 fn clear_master_key(state: &AppState) -> Result<(), String> {
-    let mut guard = state.master_key.lock().map_err(|_| "Encryption state is unavailable.")?;
+    let mut guard = state
+        .master_key
+        .lock()
+        .map_err(|_| "Encryption state is unavailable.")?;
     *guard = None;
     Ok(())
 }
 
 fn current_master_key(state: &AppState) -> Result<Zeroizing<Vec<u8>>, String> {
-    let guard = state.master_key.lock().map_err(|_| "Encryption state is unavailable.")?;
+    let guard = state
+        .master_key
+        .lock()
+        .map_err(|_| "Encryption state is unavailable.")?;
     guard
         .as_ref()
         .cloned()
@@ -294,25 +308,62 @@ fn open_database(app: &tauri::AppHandle) -> Result<Connection, String> {
     connection
         .busy_timeout(Duration::from_secs(3))
         .map_err(|error| error.to_string())?;
+
     connection
         .execute_batch(
             "
             PRAGMA journal_mode = WAL;
             PRAGMA foreign_keys = ON;
-            CREATE TABLE IF NOT EXISTS notes (
-                id TEXT PRIMARY KEY,
-                title_cipher BLOB NOT NULL,
-                content_cipher BLOB NOT NULL,
-                color TEXT NOT NULL,
-                note_type TEXT NOT NULL,
-                pinned INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            PRAGMA user_version = 1;
             ",
         )
         .map_err(|error| error.to_string())?;
+
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+
+    match version {
+        0 => {
+            connection
+                .execute_batch(
+                    "
+                    CREATE TABLE IF NOT EXISTS notes (
+                        id TEXT PRIMARY KEY,
+                        title_cipher BLOB NOT NULL,
+                        content_cipher BLOB NOT NULL,
+                        color TEXT NOT NULL,
+                        note_type TEXT NOT NULL,
+                        pinned INTEGER NOT NULL DEFAULT 0,
+                        sticky_open INTEGER NOT NULL DEFAULT 0,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+                    PRAGMA user_version = 2;
+                    ",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        1 => {
+            connection
+                .execute_batch(
+                    "
+                    BEGIN IMMEDIATE;
+                    ALTER TABLE notes
+                    ADD COLUMN sticky_open INTEGER NOT NULL DEFAULT 0;
+                    PRAGMA user_version = 2;
+                    COMMIT;
+                    ",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        2 => {}
+        other => {
+            return Err(format!(
+                "Unsupported StickyFlow database schema version: {other}"
+            ));
+        }
+    }
+
     Ok(connection)
 }
 
@@ -323,7 +374,12 @@ fn now_millis() -> Result<i64, String> {
     i64::try_from(duration.as_millis()).map_err(|error| error.to_string())
 }
 
-fn validate_note_fields(title: &str, content: &str, color: &str, note_type: &str) -> Result<(), String> {
+fn validate_note_fields(
+    title: &str,
+    content: &str,
+    color: &str,
+    note_type: &str,
+) -> Result<(), String> {
     if title.chars().count() > 200 {
         return Err("Note title cannot exceed 200 characters.".into());
     }
@@ -350,6 +406,7 @@ fn security_status(
         Some(config) => {
             if !config.enabled {
                 ensure_local_master_key(&app, &state)?;
+                restore_persisted_sticky_windows(&app, &state)?;
             }
             Ok(SecurityStatus {
                 configured: true,
@@ -470,7 +527,7 @@ fn verify_password(
         };
 
         set_master_key(&state, master_key)?;
-        restore_sticky_windows(&app, &state)?;
+        restore_persisted_sticky_windows(&app, &state)?;
         Ok(true)
     })();
 
@@ -479,22 +536,11 @@ fn verify_password(
 }
 
 #[tauri::command]
-fn lock_session(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    // Remember exactly which sticky notes were open before locking.
-    let open_ids = capture_open_sticky_ids(&app)?;
+fn lock_session(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    // Save geometry before destroying decrypted sticky windows.
+    // A state-save failure must not prevent the security lock.
+    let _ = app.save_window_state(StateFlags::POSITION | StateFlags::SIZE);
 
-    {
-        let mut guard = state
-            .sticky_restore_ids
-            .lock()
-            .map_err(|_| "Sticky restore state is unavailable.")?;
-        *guard = open_ids;
-    }
-
-    // Never leave decrypted sticky-note windows visible while locked.
     for (label, window) in app.webview_windows() {
         if label.starts_with("sticky-") {
             let _ = window.close();
@@ -504,28 +550,23 @@ fn lock_session(
     clear_master_key(&state)
 }
 
-
 fn sticky_window_label(id: &str) -> String {
     format!("sticky-{}", id.replace('-', ""))
 }
 
-fn load_note_by_id(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    id: &str,
-) -> Result<Note, String> {
+fn load_note_by_id(app: &tauri::AppHandle, state: &AppState, id: &str) -> Result<Note, String> {
     let key = current_master_key(state)?;
     let connection = open_database(app)?;
 
-    let (
-        title_cipher,
-        content_cipher,
-        color,
-        note_type,
-        pinned,
-        created_at,
-        updated_at,
-    ): (Vec<u8>, Vec<u8>, String, String, i64, i64, i64) = connection
+    let (title_cipher, content_cipher, color, note_type, pinned, created_at, updated_at): (
+        Vec<u8>,
+        Vec<u8>,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+    ) = connection
         .query_row(
             "SELECT title_cipher, content_cipher, color, note_type, pinned, created_at, updated_at
              FROM notes
@@ -572,10 +613,7 @@ fn get_note(
     load_note_by_id(&app, &state, &id)
 }
 
-fn show_sticky_window(
-    app: &tauri::AppHandle,
-    note: &Note,
-) -> Result<(), String> {
+fn show_sticky_window(app: &tauri::AppHandle, note: &Note) -> Result<(), String> {
     let label = sticky_window_label(&note.id);
 
     if let Some(window) = app.get_webview_window(&label) {
@@ -587,7 +625,7 @@ fn show_sticky_window(
         return Ok(());
     }
 
-    WebviewWindowBuilder::new(
+    let window = WebviewWindowBuilder::new(
         app,
         &label,
         WebviewUrl::App(format!("?sticky={}", note.id).into()),
@@ -597,49 +635,65 @@ fn show_sticky_window(
     .min_inner_size(260.0, 180.0)
     .resizable(true)
     .always_on_top(true)
+    .visible(false)
     .build()
     .map_err(|error| error.to_string())?;
+
+    // Restore geometry only. Visibility is controlled by StickyFlow so
+    // decrypted content can never appear before unlock.
+    let _ = window.restore_state(StateFlags::POSITION | StateFlags::SIZE);
+
+    window.show().map_err(|error| error.to_string())?;
 
     Ok(())
 }
 
-fn capture_open_sticky_ids(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
+fn set_sticky_open(app: &tauri::AppHandle, id: &str, open: bool) -> Result<(), String> {
     let connection = open_database(app)?;
-    let mut statement = connection
-        .prepare("SELECT id FROM notes")
+
+    let affected = connection
+        .execute(
+            "UPDATE notes SET sticky_open = ?2 WHERE id = ?1",
+            params![id, if open { 1 } else { 0 }],
+        )
         .map_err(|error| error.to_string())?;
 
-    let ids = statement
+    if affected == 0 {
+        return Err("Note not found.".into());
+    }
+
+    Ok(())
+}
+
+fn persisted_sticky_ids(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
+    let connection = open_database(app)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id
+             FROM notes
+             WHERE sticky_open = 1
+             ORDER BY updated_at DESC",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(|error| error.to_string())?;
 
-    let windows = app.webview_windows();
-    let mut open_ids = Vec::new();
+    let mut ids = Vec::new();
 
-    for id in ids {
-        let id = id.map_err(|error| error.to_string())?;
-        if windows.contains_key(&sticky_window_label(&id)) {
-            open_ids.push(id);
-        }
+    for row in rows {
+        ids.push(row.map_err(|error| error.to_string())?);
     }
 
-    Ok(open_ids)
+    Ok(ids)
 }
 
-fn restore_sticky_windows(
+fn restore_persisted_sticky_windows(
     app: &tauri::AppHandle,
     state: &AppState,
 ) -> Result<(), String> {
-    let ids = {
-        let mut guard = state
-            .sticky_restore_ids
-            .lock()
-            .map_err(|_| "Sticky restore state is unavailable.")?;
-
-        std::mem::take(&mut *guard)
-    };
-
-    for id in ids {
+    for id in persisted_sticky_ids(app)? {
         if let Ok(note) = load_note_by_id(app, state, &id) {
             let _ = show_sticky_window(app, &note);
         }
@@ -655,7 +709,34 @@ fn open_sticky_window(
     id: String,
 ) -> Result<(), String> {
     let note = load_note_by_id(&app, &state, &id)?;
-    show_sticky_window(&app, &note)
+    show_sticky_window(&app, &note)?;
+    set_sticky_open(&app, &id, true)
+}
+
+#[tauri::command]
+fn close_sticky_window(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let _key = current_master_key(&state)?;
+
+    // Save last known position/size before destroying the window.
+    let _ = app.save_window_state(StateFlags::POSITION | StateFlags::SIZE);
+
+    set_sticky_open(&app, &id, false)?;
+
+    if let Some(window) = app.get_webview_window(&sticky_window_label(&id)) {
+        let _ = window.close();
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn save_sticky_window_state(app: tauri::AppHandle) -> Result<(), String> {
+    app.save_window_state(StateFlags::POSITION | StateFlags::SIZE)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -823,6 +904,7 @@ fn delete_note(
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             security_status,
@@ -833,6 +915,8 @@ pub fn run() {
             list_notes,
             get_note,
             open_sticky_window,
+            close_sticky_window,
+            save_sticky_window_state,
             create_note,
             update_note,
             delete_note

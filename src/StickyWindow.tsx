@@ -27,6 +27,50 @@ export default function StickyWindow({ noteId }: Props) {
     void loadNote();
   }, [noteId]);
 
+  useEffect(() => {
+    const currentWindow = getCurrentWindow();
+    let unlistenMoved: (() => void) | undefined;
+    let unlistenResized: (() => void) | undefined;
+    let saveTimer: ReturnType<typeof setTimeout> | undefined;
+    let disposed = false;
+
+    const scheduleSave = () => {
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+      }
+
+      saveTimer = setTimeout(() => {
+        void invoke("save_sticky_window_state");
+      }, 150);
+    };
+
+    void (async () => {
+      const moved = await currentWindow.onMoved(scheduleSave);
+      if (disposed) {
+        moved();
+      } else {
+        unlistenMoved = moved;
+      }
+
+      const resized = await currentWindow.onResized(scheduleSave);
+      if (disposed) {
+        resized();
+      } else {
+        unlistenResized = resized;
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+      }
+      unlistenMoved?.();
+      unlistenResized?.();
+    };
+  }, []);
+
+
   async function loadNote() {
     try {
       setError("");
@@ -48,7 +92,11 @@ export default function StickyWindow({ noteId }: Props) {
   }
 
   async function closeWindow() {
-    await getCurrentWindow().close();
+    try {
+      await invoke("close_sticky_window", { id: noteId });
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
   }
 
   if (error) {
