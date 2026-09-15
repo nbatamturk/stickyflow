@@ -1043,6 +1043,26 @@ fn calculate_chip_width(title: &str, settings: &ChipSettings) -> i32 {
 }
 
 #[cfg(target_os = "linux")]
+fn update_named_gtk_label(widget: &gtk::Widget, target_name: &str, text: &str) -> bool {
+    if widget.widget_name().as_str() == target_name {
+        if let Ok(label) = widget.clone().downcast::<gtk::Label>() {
+            label.set_text(text);
+            return true;
+        }
+    }
+
+    if let Ok(container) = widget.clone().downcast::<gtk::Container>() {
+        for child in container.children() {
+            if update_named_gtk_label(&child, target_name, text) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+#[cfg(target_os = "linux")]
 fn show_chip_window(
     app: &tauri::AppHandle,
     note: &Note,
@@ -1055,8 +1075,22 @@ fn show_chip_window(
 
     let chip_width = calculate_chip_width(&note.title, &settings);
 
-    // Existing native chip: resize it immediately when Settings change.
+    // Existing native chip: reuse the same native window.
+    // Refresh its GTK title in-place so Quick Edit changes are reflected
+    // without closing/recreating the raw Tauri window.
     if let Some(window) = app.get_window(&label) {
+        let display_title = compact_chip_title(&note.title);
+
+        if let Ok(default_vbox) = window.default_vbox() {
+            for child in default_vbox.children() {
+                if update_named_gtk_label(&child, "stickyflow-chip-title", &display_title) {
+                    break;
+                }
+            }
+        }
+
+        let _ = window.set_title(&note.title);
+
         window
             .set_size(tauri::LogicalSize::new(
                 chip_width as f64,
@@ -1395,11 +1429,8 @@ fn set_sticky_compact_inner(
     let note = load_note_by_id(app, state, id)?;
 
     if compact {
+        // Preserve expanded geometry first.
         let _ = save_window_geometry(app, id, "expanded");
-
-        if let Some(window) = app.get_window(&sticky_expanded_label(id)) {
-            let _ = window.hide();
-        }
 
         let connection = open_database(app)?;
 
@@ -1415,13 +1446,40 @@ fn set_sticky_compact_inner(
             .map_err(|error| error.to_string())?;
 
         let preferences = load_sticky_preferences(app, id)?;
-        show_chip_window(app, &note, &preferences)?;
-    } else {
-        let _ = save_window_geometry(app, id, "chip");
 
-        if let Some(window) = app.get_window(&sticky_chip_label(id)) {
-            let _ = window.hide();
+        // IMPORTANT:
+        // Do NOT hide expanded until the native chip is definitely visible.
+        match show_chip_window(app, &note, &preferences) {
+            Ok(()) => {
+                if let Some(window) = app.get_window(&sticky_expanded_label(id)) {
+                    let _ = window.hide();
+                }
+
+                eprintln!("[stickyflow] compact transition OK: {}", id);
+
+                Ok(())
+            }
+
+            Err(error) => {
+                eprintln!(
+                    "[stickyflow] compact transition FAILED for {}: {}",
+                    id, error
+                );
+
+                // Roll back persisted mode because expanded is still visible.
+                let _ = connection.execute(
+                    "UPDATE notes
+                     SET sticky_compact = 0
+                     WHERE id = ?1",
+                    params![id],
+                );
+
+                Err(format!("Failed to show compact chip: {error}"))
+            }
         }
+    } else {
+        // Preserve compact geometry first.
+        let _ = save_window_geometry(app, id, "chip");
 
         let connection = open_database(app)?;
 
@@ -1437,10 +1495,38 @@ fn set_sticky_compact_inner(
             .map_err(|error| error.to_string())?;
 
         let preferences = load_sticky_preferences(app, id)?;
-        show_expanded_window(app, &note, &preferences)?;
-    }
 
-    Ok(())
+        // Same rule in the opposite direction:
+        // don't hide chip until expanded is confirmed visible.
+        match show_expanded_window(app, &note, &preferences) {
+            Ok(()) => {
+                if let Some(window) = app.get_window(&sticky_chip_label(id)) {
+                    let _ = window.hide();
+                }
+
+                eprintln!("[stickyflow] expanded transition OK: {}", id);
+
+                Ok(())
+            }
+
+            Err(error) => {
+                eprintln!(
+                    "[stickyflow] expanded transition FAILED for {}: {}",
+                    id, error
+                );
+
+                // Roll back persisted mode because chip is still visible.
+                let _ = connection.execute(
+                    "UPDATE notes
+                     SET sticky_compact = 1
+                     WHERE id = ?1",
+                    params![id],
+                );
+
+                Err(format!("Failed to show expanded sticky: {error}"))
+            }
+        }
+    }
 }
 
 #[tauri::command]

@@ -25,7 +25,12 @@ export default function StickyWindow({ noteId, mode }: Props) {
   const [note, setNote] = useState<Note | null>(null);
   const [error, setError] = useState("");
   const [alwaysOnTop, setAlwaysOnTop] = useState(true);
+  const [editing, setEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editContent, setEditContent] = useState("");
+  const [saving, setSaving] = useState(false);
   const chipTitleRef = useRef<HTMLElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     void loadNote();
@@ -118,8 +123,100 @@ export default function StickyWindow({ noteId, mode }: Props) {
       setError("");
       const loaded = await invoke<Note>("get_note", { id: noteId });
       setNote(loaded);
+      setEditTitle(loaded.title);
+      setEditContent(loaded.content);
+      setEditing(false);
     } catch (cause) {
       setError(toMessage(cause));
+    }
+  }
+
+  async function startQuickEdit() {
+    if (!note || mode !== "expanded") {
+      return;
+    }
+
+    setError("");
+    setEditTitle(note.title);
+    setEditContent(note.content);
+
+    try {
+      const currentWindow = getCurrentWindow();
+
+      // Sticky windows normally reject keyboard focus.
+      // Editing temporarily opts this one window into focus.
+      await currentWindow.setFocusable(true);
+      setEditing(true);
+      await currentWindow.setFocus();
+
+      requestAnimationFrame(() => {
+        titleInputRef.current?.focus();
+        titleInputRef.current?.select();
+      });
+    } catch (cause) {
+      setEditing(false);
+      setError(toMessage(cause));
+
+      try {
+        await getCurrentWindow().setFocusable(false);
+      } catch {
+        // Preserve the original error.
+      }
+    }
+  }
+
+  async function returnToFocuslessMode() {
+    try {
+      await getCurrentWindow().setFocusable(false);
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
+  }
+
+  async function cancelQuickEdit() {
+    if (!note) {
+      return;
+    }
+
+    setEditTitle(note.title);
+    setEditContent(note.content);
+    setEditing(false);
+
+    await returnToFocuslessMode();
+  }
+
+  async function saveQuickEdit() {
+    if (!note || saving) {
+      return;
+    }
+
+    const title = editTitle.trim() || "Untitled";
+
+    setSaving(true);
+    setError("");
+
+    try {
+      const updated = await invoke<Note>("update_note", {
+        input: {
+          id: note.id,
+          title,
+          content: editContent,
+          color: note.color,
+          noteType: note.noteType,
+          pinned: note.pinned,
+        },
+      });
+
+      setNote(updated);
+      setEditTitle(updated.title);
+      setEditContent(updated.content);
+      setEditing(false);
+
+      await returnToFocuslessMode();
+    } catch (cause) {
+      setError(toMessage(cause));
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -199,35 +296,128 @@ export default function StickyWindow({ noteId, mode }: Props) {
   }
 
   return (
-    <main className={`sticky-shell sticky-${note.color}`}>
+    <main
+      className={`sticky-shell sticky-${note.color}`}
+      onKeyDown={(event) => {
+        if (!editing) {
+          return;
+        }
+
+        if (event.key === "Escape") {
+          event.preventDefault();
+          void cancelQuickEdit();
+          return;
+        }
+
+        if (
+          event.key === "Enter" &&
+          (event.ctrlKey || event.metaKey)
+        ) {
+          event.preventDefault();
+          void saveQuickEdit();
+        }
+      }}
+    >
       <header className="sticky-header">
-        <div>
+        <div className="sticky-title-block">
           <span>{note.noteType}</span>
-          <h1>{note.title}</h1>
+
+          {editing ? (
+            <input
+              className="sticky-edit-title"
+              maxLength={200}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                setEditTitle(value);
+              }}
+              ref={titleInputRef}
+              type="text"
+              value={editTitle}
+            />
+          ) : (
+            <h1>{note.title}</h1>
+          )}
         </div>
 
         <div className="sticky-actions">
-          <button
-            onClick={() => void switchMode(true)}
-            title="Collapse"
-            type="button"
-          >
-            ▂
-          </button>
+          {editing ? (
+            <>
+              <button
+                className="sticky-save-button"
+                disabled={saving}
+                onClick={() => void saveQuickEdit()}
+                title="Save (Ctrl+Enter)"
+                type="button"
+              >
+                {saving ? "Saving…" : "Save"}
+              </button>
 
-          <button onClick={() => void toggleAlwaysOnTop()} type="button">
-            {alwaysOnTop ? "Top ✓" : "Top"}
-          </button>
+              <button
+                disabled={saving}
+                onClick={() => void cancelQuickEdit()}
+                title="Cancel (Esc)"
+                type="button"
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                onClick={() => void startQuickEdit()}
+                title="Quick Edit"
+                type="button"
+              >
+                Edit
+              </button>
 
-          <button onClick={() => void closeWindow()} type="button">
-            ×
-          </button>
+              <button
+                onClick={() => void switchMode(true)}
+                title="Collapse"
+                type="button"
+              >
+                ▂
+              </button>
+
+              <button
+                onClick={() => void toggleAlwaysOnTop()}
+                type="button"
+              >
+                {alwaysOnTop ? "Top ✓" : "Top"}
+              </button>
+
+              <button
+                onClick={() => void closeWindow()}
+                type="button"
+              >
+                ×
+              </button>
+            </>
+          )}
         </div>
       </header>
 
-      <section className="sticky-content">
-        {note.content || <em>Empty note</em>}
-      </section>
+      {editing ? (
+        <section className="sticky-quick-edit">
+          <textarea
+            className="sticky-edit-content"
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setEditContent(value);
+            }}
+            spellCheck={false}
+            value={editContent}
+          />
+
+          <div className="sticky-edit-hint">
+            Ctrl+Enter save · Esc cancel
+          </div>
+        </section>
+      ) : (
+        <section className="sticky-content">
+          {note.content || <em>Empty note</em>}
+        </section>
+      )}
     </main>
   );
 }

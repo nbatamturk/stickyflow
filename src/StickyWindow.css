@@ -18,6 +18,7 @@ body:has(.sticky-chip) {
 }
 
 .sticky-shell {
+  box-sizing: border-box;
   min-height: 100vh;
   padding: 16px;
   background: var(--sticky-bg);
@@ -154,4 +155,74 @@ body:has(.sticky-chip) {
 .sticky-chip-open span {
   opacity: 0.5;
   font-size: 16px;
+}
+
+
+/* Quick Edit */
+
+.sticky-title-block {
+  flex: 1;
+  min-width: 0;
+}
+
+.sticky-edit-title {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 3px;
+  padding: 4px 7px;
+  border: 1px solid var(--sticky-border);
+  border-radius: 7px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.52);
+  color: var(--sticky-text);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.sticky-edit-title:focus,
+.sticky-edit-content:focus {
+  border-color: rgba(45, 39, 24, 0.42);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.22);
+}
+
+.sticky-save-button {
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.58) !important;
+}
+
+.sticky-actions button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.sticky-quick-edit {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 12px;
+}
+
+.sticky-edit-content {
+  box-sizing: border-box;
+  width: 100%;
+  height: calc(100vh - 112px);
+  min-height: 90px;
+  padding: 9px;
+  resize: none;
+  border: 1px solid var(--sticky-border);
+  border-radius: 8px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.42);
+  color: var(--sticky-text);
+  font: inherit;
+  line-height: 1.45;
+}
+
+.sticky-edit-hint {
+  font-size: 10px;
+  font-weight: 600;
+  opacity: 0.48;
+  text-align: right;
 }
