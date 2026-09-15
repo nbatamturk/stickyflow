@@ -3,10 +3,40 @@ import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
 type View = "loading" | "setup" | "locked" | "workspace";
+type NoteType = "note" | "snippet" | "todo";
 
 type SecurityStatus = {
   configured: boolean;
   enabled: boolean;
+};
+
+type Note = {
+  id: string;
+  title: string;
+  content: string;
+  color: string;
+  noteType: NoteType;
+  pinned: boolean;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type Draft = {
+  id: string | null;
+  title: string;
+  content: string;
+  color: string;
+  noteType: NoteType;
+  pinned: boolean;
+};
+
+const emptyDraft: Draft = {
+  id: null,
+  title: "",
+  content: "",
+  color: "sand",
+  noteType: "note",
+  pinned: false,
 };
 
 function App() {
@@ -16,10 +46,24 @@ function App() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [draft, setDraft] = useState<Draft>(emptyDraft);
+  const [editorOpen, setEditorOpen] = useState(false);
 
   useEffect(() => {
     void initializeSecurity();
   }, []);
+
+  useEffect(() => {
+    if (view === "workspace") {
+      void loadNotes();
+    } else {
+      setNotes([]);
+      setDraft(emptyDraft);
+      setEditorOpen(false);
+    }
+  }, [view]);
 
   async function initializeSecurity() {
     try {
@@ -103,10 +147,126 @@ function App() {
     }
   }
 
-  function handleLockNow() {
-    clearPasswordFields();
+  async function handleLockNow() {
+    setBusy(true);
     setError("");
-    setView("locked");
+    try {
+      await invoke("lock_session");
+      clearPasswordFields();
+      setNotes([]);
+      setDraft(emptyDraft);
+      setEditorOpen(false);
+      setView("locked");
+    } catch (cause) {
+      setError(toMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadNotes() {
+    setNotesLoading(true);
+    setError("");
+    try {
+      const loaded = await invoke<Note[]>("list_notes");
+      setNotes(loaded);
+    } catch (cause) {
+      setError(toMessage(cause));
+    } finally {
+      setNotesLoading(false);
+    }
+  }
+
+  function startNewNote() {
+    setDraft(emptyDraft);
+    setEditorOpen(true);
+    setError("");
+  }
+
+  function editNote(note: Note) {
+    setDraft({
+      id: note.id,
+      title: note.title,
+      content: note.content,
+      color: note.color,
+      noteType: note.noteType,
+      pinned: note.pinned,
+    });
+    setEditorOpen(true);
+    setError("");
+  }
+
+  async function saveNote(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+
+    const title = draft.title.trim() || "Untitled";
+
+    try {
+      if (draft.id) {
+        const updated = await invoke<Note>("update_note", {
+          input: {
+            ...draft,
+            title,
+          },
+        });
+        setNotes((current) => sortNotes(current.map((note) => (note.id === updated.id ? updated : note))));
+      } else {
+        const created = await invoke<Note>("create_note", {
+          input: {
+            title,
+            content: draft.content,
+            color: draft.color,
+            noteType: draft.noteType,
+          },
+        });
+        setNotes((current) => sortNotes([created, ...current]));
+      }
+
+      setDraft(emptyDraft);
+      setEditorOpen(false);
+    } catch (cause) {
+      setError(toMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteNote(note: Note) {
+    setBusy(true);
+    setError("");
+    try {
+      await invoke("delete_note", { id: note.id });
+      setNotes((current) => current.filter((item) => item.id !== note.id));
+      if (draft.id === note.id) {
+        setDraft(emptyDraft);
+        setEditorOpen(false);
+      }
+    } catch (cause) {
+      setError(toMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function togglePinned(note: Note) {
+    setError("");
+    try {
+      const updated = await invoke<Note>("update_note", {
+        input: {
+          id: note.id,
+          title: note.title,
+          content: note.content,
+          color: note.color,
+          noteType: note.noteType,
+          pinned: !note.pinned,
+        },
+      });
+      setNotes((current) => sortNotes(current.map((item) => (item.id === updated.id ? updated : item))));
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
   }
 
   function clearPasswordFields() {
@@ -132,8 +292,8 @@ function App() {
             <p className="eyebrow">WELCOME TO STICKYFLOW</p>
             <h1>Protect your notes</h1>
             <p className="muted">
-              Add an optional application password. Only an Argon2id password hash is stored;
-              your plaintext password is never written to disk.
+              Add an optional application password. Your master encryption key stays in the Rust
+              backend and is never exposed to the note UI.
             </p>
           </div>
 
@@ -174,7 +334,8 @@ function App() {
           </form>
 
           <p className="security-note">
-            Note encryption will be added separately; this step protects application startup.
+            Notes are encrypted at rest in both modes. Without a password, the local encryption key
+            is protected by your OS user account and file permissions rather than a separate password.
           </p>
         </section>
       </main>
@@ -189,7 +350,7 @@ function App() {
           <div className="auth-copy">
             <p className="eyebrow">STICKYFLOW LOCKED</p>
             <h1>Unlock your notes</h1>
-            <p className="muted">Your note windows stay hidden until the application is unlocked.</p>
+            <p className="muted">The decryption key is not loaded until your password is verified.</p>
           </div>
 
           <form className="auth-form" onSubmit={handleUnlock}>
@@ -224,47 +385,180 @@ function App() {
           <h1>StickyFlow</h1>
         </div>
         <div className="topbar-actions">
-          <span className="status-pill">{lockEnabled ? "Lock enabled" : "Local mode"}</span>
+          <span className="status-pill">{lockEnabled ? "Encrypted + locked" : "Encrypted local mode"}</span>
           {lockEnabled && (
-            <button className="ghost-button small-button" onClick={handleLockNow} type="button">
+            <button className="ghost-button small-button" disabled={busy} onClick={handleLockNow} type="button">
               Lock now
             </button>
           )}
         </div>
       </header>
 
-      <section className="hero-panel">
+      <section className="hero-panel notes-hero">
         <div>
-          <p className="eyebrow">V0.1 FOUNDATION</p>
-          <h2>The secure shell is running.</h2>
+          <p className="eyebrow">ENCRYPTED SQLITE</p>
+          <h2>Your notes are now real.</h2>
           <p className="muted">
-            Next: encrypted SQLite storage, real sticky windows, snippets and one-click copy.
+            Titles and contents are AES-256-GCM encrypted before they are written to SQLite.
           </p>
         </div>
-        <button className="primary-button mock-button" disabled type="button">
+        <button className="primary-button" onClick={startNewNote} type="button">
           + New note
         </button>
       </section>
 
-      <section className="card-grid" aria-label="Planned StickyFlow features">
-        <article className="feature-card">
-          <span className="feature-icon">N</span>
-          <h3>Notes</h3>
-          <p>Fast autosaved notes that can live as independent desktop windows.</p>
-        </article>
-        <article className="feature-card">
-          <span className="feature-icon">&lt;/&gt;</span>
-          <h3>Snippets</h3>
-          <p>Reusable commands and text blocks with one-click clipboard actions.</p>
-        </article>
-        <article className="feature-card">
-          <span className="feature-icon">✓</span>
-          <h3>Todos</h3>
-          <p>Local tasks designed for future provider-based synchronization.</p>
-        </article>
+      {error && <p className="workspace-error error-message">{error}</p>}
+
+      <section className="notes-layout">
+        <div className="notes-panel">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">CONTROL CENTER</p>
+              <h3>Notes</h3>
+            </div>
+            <span className="note-count">{notes.length}</span>
+          </div>
+
+          {notesLoading ? (
+            <p className="empty-state">Decrypting notes…</p>
+          ) : notes.length === 0 ? (
+            <div className="empty-state">
+              <strong>No notes yet.</strong>
+              <span>Create the first encrypted note.</span>
+            </div>
+          ) : (
+            <div className="note-list">
+              {notes.map((note) => (
+                <article className={`note-card note-${note.color}`} key={note.id}>
+                  <button className="note-main" onClick={() => editNote(note)} type="button">
+                    <div className="note-card-topline">
+                      <span className="note-type">{note.noteType}</span>
+                      {note.pinned && <span title="Pinned">●</span>}
+                    </div>
+                    <h4>{note.title}</h4>
+                    <p>{note.content || "Empty note"}</p>
+                    <time>{formatDate(note.updatedAt)}</time>
+                  </button>
+                  <div className="note-actions">
+                    <button className="icon-button" onClick={() => void togglePinned(note)} type="button">
+                      {note.pinned ? "Unpin" : "Pin"}
+                    </button>
+                    <button className="icon-button danger-button" onClick={() => void deleteNote(note)} type="button">
+                      Delete
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <aside className={`editor-panel ${editorOpen ? "editor-open" : ""}`}>
+          {editorOpen ? (
+            <form className="note-editor" onSubmit={saveNote}>
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">{draft.id ? "EDIT NOTE" : "NEW NOTE"}</p>
+                  <h3>{draft.id ? "Update note" : "Create note"}</h3>
+                </div>
+                <button
+                  className="icon-button"
+                  onClick={() => {
+                    setEditorOpen(false);
+                    setDraft(emptyDraft);
+                  }}
+                  type="button"
+                >
+                  Close
+                </button>
+              </div>
+
+              <label>
+                Title
+                <input
+                  autoFocus
+                  maxLength={200}
+                  onChange={(event) => setDraft((current) => ({ ...current, title: event.currentTarget.value }))}
+                  placeholder="e.g. CPMS commands"
+                  value={draft.title}
+                />
+              </label>
+
+              <label>
+                Type
+                <select
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, noteType: event.currentTarget.value as NoteType }))
+                  }
+                  value={draft.noteType}
+                >
+                  <option value="note">Note</option>
+                  <option value="snippet">Snippet</option>
+                  <option value="todo">Todo</option>
+                </select>
+              </label>
+
+              <label>
+                Content
+                <textarea
+                  onChange={(event) => setDraft((current) => ({ ...current, content: event.currentTarget.value }))}
+                  placeholder="Write or paste anything…"
+                  rows={12}
+                  value={draft.content}
+                />
+              </label>
+
+              <fieldset className="color-fieldset">
+                <legend>Color</legend>
+                <div className="color-options">
+                  {[
+                    ["sand", "Sand"],
+                    ["yellow", "Yellow"],
+                    ["green", "Green"],
+                    ["blue", "Blue"],
+                    ["pink", "Pink"],
+                  ].map(([value, label]) => (
+                    <button
+                      aria-pressed={draft.color === value}
+                      className={`color-chip note-${value}`}
+                      key={value}
+                      onClick={() => setDraft((current) => ({ ...current, color: value }))}
+                      type="button"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </fieldset>
+
+              <button className="primary-button" disabled={busy} type="submit">
+                {busy ? "Saving…" : draft.id ? "Save changes" : "Create note"}
+              </button>
+            </form>
+          ) : (
+            <div className="editor-placeholder">
+              <span className="feature-icon">N</span>
+              <h3>Select a note</h3>
+              <p className="muted">Open an existing note or create a new one to edit its encrypted contents.</p>
+            </div>
+          )}
+        </aside>
       </section>
     </main>
   );
+}
+
+function sortNotes(notes: Note[]) {
+  return [...notes].sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt);
+}
+
+function formatDate(timestamp: number) {
+  return new Intl.DateTimeFormat(undefined, {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(timestamp));
 }
 
 function toMessage(cause: unknown) {
