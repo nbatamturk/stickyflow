@@ -4,10 +4,17 @@ import App from "./App";
 import StickyWindow from "./StickyWindow";
 import "./Notes.css";
 
-const stickyNoteId = new URLSearchParams(window.location.search).get("sticky");
+const params = new URLSearchParams(window.location.search);
+const stickyNoteId = params.get("sticky");
+const stickyMode =
+  params.get("mode") === "chip" ? "chip" : "expanded";
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    {stickyNoteId ? <StickyWindow noteId={stickyNoteId} /> : <App />}
+    {stickyNoteId ? (
+      <StickyWindow noteId={stickyNoteId} mode={stickyMode} />
+    ) : (
+      <App />
+    )}
   </React.StrictMode>,
 );

@@ -10,7 +10,8 @@ body,
   height: 100%;
 }
 
-body:has(.sticky-shell) {
+body:has(.sticky-shell),
+body:has(.sticky-chip) {
   margin: 0;
   overflow: hidden;
   background: transparent;
@@ -92,4 +93,65 @@ body:has(.sticky-shell) {
 
 .sticky-error {
   background: #f4d0d0;
+}
+
+
+.sticky-chip {
+  width: 100vw;
+  height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--sticky-border);
+  background: var(--sticky-bg);
+  color: var(--sticky-text);
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.sticky-chip-drag {
+  width: 18px;
+  flex: 0 0 18px;
+  padding: 0;
+  border: 0;
+  border-right: 1px solid var(--sticky-border);
+  background: rgba(0, 0, 0, 0.04);
+  color: inherit;
+  cursor: grab;
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+.sticky-chip-drag:active {
+  cursor: grabbing;
+}
+
+.sticky-chip-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sticky-chip-open strong {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 150px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.sticky-chip-open span {
+  opacity: 0.5;
+  font-size: 16px;
 }

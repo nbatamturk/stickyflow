@@ -10,6 +10,8 @@ use argon2::{
     Argon2,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+#[cfg(target_os = "linux")]
+use gtk::prelude::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -18,8 +20,9 @@ use std::{
     sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_window_state::{AppHandleExt, StateFlags, WindowExt};
+
+use tauri::{window::WindowBuilder, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -47,6 +50,18 @@ struct SecurityConfig {
 struct SecurityStatus {
     configured: bool,
     enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StickyPreferences {
+    compact: bool,
+    compact_x: Option<i64>,
+    compact_y: Option<i64>,
+    expanded_x: Option<i64>,
+    expanded_y: Option<i64>,
+    expanded_width: i64,
+    expanded_height: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -335,10 +350,17 @@ fn open_database(app: &tauri::AppHandle) -> Result<Connection, String> {
                         note_type TEXT NOT NULL,
                         pinned INTEGER NOT NULL DEFAULT 0,
                         sticky_open INTEGER NOT NULL DEFAULT 0,
+                        sticky_compact INTEGER NOT NULL DEFAULT 0,
+                        compact_x INTEGER,
+                        compact_y INTEGER,
+                        expanded_x INTEGER,
+                        expanded_y INTEGER,
+                        expanded_width INTEGER NOT NULL DEFAULT 360,
+                        expanded_height INTEGER NOT NULL DEFAULT 320,
                         created_at INTEGER NOT NULL,
                         updated_at INTEGER NOT NULL
                     );
-                    PRAGMA user_version = 2;
+                    PRAGMA user_version = 4;
                     ",
                 )
                 .map_err(|error| error.to_string())?;
@@ -348,15 +370,54 @@ fn open_database(app: &tauri::AppHandle) -> Result<Connection, String> {
                 .execute_batch(
                     "
                     BEGIN IMMEDIATE;
-                    ALTER TABLE notes
-                    ADD COLUMN sticky_open INTEGER NOT NULL DEFAULT 0;
-                    PRAGMA user_version = 2;
+                    ALTER TABLE notes ADD COLUMN sticky_open INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE notes ADD COLUMN sticky_compact INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE notes ADD COLUMN compact_x INTEGER;
+                    ALTER TABLE notes ADD COLUMN compact_y INTEGER;
+                    ALTER TABLE notes ADD COLUMN expanded_x INTEGER;
+                    ALTER TABLE notes ADD COLUMN expanded_y INTEGER;
+                    ALTER TABLE notes ADD COLUMN expanded_width INTEGER NOT NULL DEFAULT 360;
+                    ALTER TABLE notes ADD COLUMN expanded_height INTEGER NOT NULL DEFAULT 320;
+                    PRAGMA user_version = 4;
                     COMMIT;
                     ",
                 )
                 .map_err(|error| error.to_string())?;
         }
-        2 => {}
+        2 => {
+            connection
+                .execute_batch(
+                    "
+                    BEGIN IMMEDIATE;
+                    ALTER TABLE notes ADD COLUMN sticky_compact INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE notes ADD COLUMN compact_x INTEGER;
+                    ALTER TABLE notes ADD COLUMN compact_y INTEGER;
+                    ALTER TABLE notes ADD COLUMN expanded_x INTEGER;
+                    ALTER TABLE notes ADD COLUMN expanded_y INTEGER;
+                    ALTER TABLE notes ADD COLUMN expanded_width INTEGER NOT NULL DEFAULT 360;
+                    ALTER TABLE notes ADD COLUMN expanded_height INTEGER NOT NULL DEFAULT 320;
+                    PRAGMA user_version = 4;
+                    COMMIT;
+                    ",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        3 => {
+            connection
+                .execute_batch(
+                    "
+                    BEGIN IMMEDIATE;
+                    ALTER TABLE notes ADD COLUMN compact_x INTEGER;
+                    ALTER TABLE notes ADD COLUMN compact_y INTEGER;
+                    ALTER TABLE notes ADD COLUMN expanded_x INTEGER;
+                    ALTER TABLE notes ADD COLUMN expanded_y INTEGER;
+                    PRAGMA user_version = 4;
+                    COMMIT;
+                    ",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        4 => {}
         other => {
             return Err(format!(
                 "Unsupported StickyFlow database schema version: {other}"
@@ -537,11 +598,21 @@ fn verify_password(
 
 #[tauri::command]
 fn lock_session(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    // Save geometry before destroying decrypted sticky windows.
-    // A state-save failure must not prevent the security lock.
+    // Persist our own per-mode geometry before closing any sticky window.
+    // Do not depend only on frontend move/resize events: the user may move
+    // a chip and immediately lock without ever expanding it.
+    if let Ok(ids) = persisted_sticky_ids(&app) {
+        for id in ids {
+            let _ = save_window_geometry(&app, &id, "expanded");
+            let _ = save_window_geometry(&app, &id, "chip");
+        }
+    }
+
+    // Keep the Tauri window-state file as an additional fallback.
+    // A state-save failure must never prevent the security lock.
     let _ = app.save_window_state(StateFlags::POSITION | StateFlags::SIZE);
 
-    for (label, window) in app.webview_windows() {
+    for (label, window) in app.windows() {
         if label.starts_with("sticky-") {
             let _ = window.close();
         }
@@ -550,8 +621,16 @@ fn lock_session(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Res
     clear_master_key(&state)
 }
 
-fn sticky_window_label(id: &str) -> String {
+fn sticky_base_label(id: &str) -> String {
     format!("sticky-{}", id.replace('-', ""))
+}
+
+fn sticky_expanded_label(id: &str) -> String {
+    format!("{}-expanded", sticky_base_label(id))
+}
+
+fn sticky_chip_label(id: &str) -> String {
+    format!("{}-chip", sticky_base_label(id))
 }
 
 fn load_note_by_id(app: &tauri::AppHandle, state: &AppState, id: &str) -> Result<Note, String> {
@@ -613,39 +692,765 @@ fn get_note(
     load_note_by_id(&app, &state, &id)
 }
 
-fn show_sticky_window(app: &tauri::AppHandle, note: &Note) -> Result<(), String> {
-    let label = sticky_window_label(&note.id);
+fn load_sticky_preferences(app: &tauri::AppHandle, id: &str) -> Result<StickyPreferences, String> {
+    let connection = open_database(app)?;
+
+    connection
+        .query_row(
+            "SELECT
+                sticky_compact,
+                compact_x,
+                compact_y,
+                expanded_x,
+                expanded_y,
+                expanded_width,
+                expanded_height
+             FROM notes
+             WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(StickyPreferences {
+                    compact: row.get::<_, i64>(0)? != 0,
+                    compact_x: row.get(1)?,
+                    compact_y: row.get(2)?,
+                    expanded_x: row.get(3)?,
+                    expanded_y: row.get(4)?,
+                    expanded_width: row.get(5)?,
+                    expanded_height: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn configure_widget_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    window
+        .set_skip_taskbar(true)
+        .map_err(|error| error.to_string())?;
+    window
+        .set_focusable(false)
+        .map_err(|error| error.to_string())?;
+    window
+        .set_always_on_top(true)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn apply_position(window: &tauri::WebviewWindow, x: Option<i64>, y: Option<i64>) {
+    if let (Some(x), Some(y)) = (x, y) {
+        let _ = window.set_position(tauri::LogicalPosition::new(x as f64, y as f64));
+    }
+}
+
+fn show_expanded_window(
+    app: &tauri::AppHandle,
+    note: &Note,
+    preferences: &StickyPreferences,
+) -> Result<(), String> {
+    let label = sticky_expanded_label(&note.id);
 
     if let Some(window) = app.get_webview_window(&label) {
-        window.show().map_err(|error| error.to_string())?;
+        configure_widget_window(&window)?;
+
         window
-            .set_always_on_top(true)
+            .set_size(tauri::LogicalSize::new(
+                preferences.expanded_width as f64,
+                preferences.expanded_height as f64,
+            ))
             .map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
+
+        apply_position(&window, preferences.expanded_x, preferences.expanded_y);
+
+        window.show().map_err(|error| error.to_string())?;
         return Ok(());
     }
 
     let window = WebviewWindowBuilder::new(
         app,
         &label,
-        WebviewUrl::App(format!("?sticky={}", note.id).into()),
+        WebviewUrl::App(format!("?sticky={}&mode=expanded", note.id).into()),
     )
     .title(&note.title)
-    .inner_size(360.0, 320.0)
+    .inner_size(
+        preferences.expanded_width as f64,
+        preferences.expanded_height as f64,
+    )
     .min_inner_size(260.0, 180.0)
     .resizable(true)
     .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .focusable(false)
     .visible(false)
     .build()
     .map_err(|error| error.to_string())?;
 
-    // Restore geometry only. Visibility is controlled by StickyFlow so
-    // decrypted content can never appear before unlock.
-    let _ = window.restore_state(StateFlags::POSITION | StateFlags::SIZE);
+    apply_position(&window, preferences.expanded_x, preferences.expanded_y);
+
+    window.show().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+const CHIP_DEFAULT_HEIGHT: i32 = 26;
+const CHIP_DEFAULT_MIN_WIDTH: i32 = 60;
+const CHIP_DEFAULT_MAX_WIDTH: i32 = 180;
+const CHIP_DEFAULT_FIXED_WIDTH: i32 = 90;
+const CHIP_DEFAULT_FONT_SIZE: i32 = 11;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChipSettings {
+    auto_width: bool,
+    fixed_width: i32,
+    height: i32,
+    min_width: i32,
+    max_width: i32,
+    font_size: i32,
+}
+
+impl Default for ChipSettings {
+    fn default() -> Self {
+        Self {
+            auto_width: true,
+            fixed_width: CHIP_DEFAULT_FIXED_WIDTH,
+            height: CHIP_DEFAULT_HEIGHT,
+            min_width: CHIP_DEFAULT_MIN_WIDTH,
+            max_width: CHIP_DEFAULT_MAX_WIDTH,
+            font_size: CHIP_DEFAULT_FONT_SIZE,
+        }
+    }
+}
+
+fn normalize_chip_settings(mut settings: ChipSettings) -> ChipSettings {
+    settings.height = settings.height.clamp(20, 64);
+    settings.min_width = settings.min_width.clamp(48, 480);
+    settings.max_width = settings.max_width.clamp(settings.min_width, 640);
+
+    settings.fixed_width = settings
+        .fixed_width
+        .clamp(settings.min_width, settings.max_width);
+
+    settings.font_size = settings.font_size.clamp(8, 24);
+
+    settings
+}
+
+fn ensure_app_settings_table(connection: &rusqlite::Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+            ",
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn read_app_setting(connection: &rusqlite::Connection, key: &str) -> Option<String> {
+    connection
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .ok()
+}
+
+fn write_app_setting(
+    connection: &rusqlite::Connection,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "
+            INSERT INTO app_settings (key, value)
+            VALUES (?1, ?2)
+            ON CONFLICT(key)
+            DO UPDATE SET value = excluded.value
+            ",
+            params![key, value],
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+fn load_chip_settings(app: &tauri::AppHandle) -> Result<ChipSettings, String> {
+    let connection = open_database(app)?;
+    ensure_app_settings_table(&connection)?;
+
+    let defaults = ChipSettings::default();
+
+    let auto_width = read_app_setting(&connection, "chip_auto_width")
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or(defaults.auto_width);
+
+    let fixed_width = read_app_setting(&connection, "chip_fixed_width")
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(defaults.fixed_width);
+
+    let height = read_app_setting(&connection, "chip_height")
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(defaults.height);
+
+    let min_width = read_app_setting(&connection, "chip_min_width")
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(defaults.min_width);
+
+    let max_width = read_app_setting(&connection, "chip_max_width")
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(defaults.max_width);
+
+    let font_size = read_app_setting(&connection, "chip_font_size")
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(defaults.font_size);
+
+    Ok(normalize_chip_settings(ChipSettings {
+        auto_width,
+        fixed_width,
+        height,
+        min_width,
+        max_width,
+        font_size,
+    }))
+}
+
+fn persist_chip_settings(app: &tauri::AppHandle, settings: &ChipSettings) -> Result<(), String> {
+    let connection = open_database(app)?;
+    ensure_app_settings_table(&connection)?;
+
+    write_app_setting(
+        &connection,
+        "chip_auto_width",
+        &settings.auto_width.to_string(),
+    )?;
+
+    write_app_setting(
+        &connection,
+        "chip_fixed_width",
+        &settings.fixed_width.to_string(),
+    )?;
+
+    write_app_setting(&connection, "chip_height", &settings.height.to_string())?;
+
+    write_app_setting(
+        &connection,
+        "chip_min_width",
+        &settings.min_width.to_string(),
+    )?;
+
+    write_app_setting(
+        &connection,
+        "chip_max_width",
+        &settings.max_width.to_string(),
+    )?;
+
+    write_app_setting(
+        &connection,
+        "chip_font_size",
+        &settings.font_size.to_string(),
+    )?;
+
+    Ok(())
+}
+
+fn compact_chip_title(title: &str) -> String {
+    let source = title.trim();
+
+    let source = if source.is_empty() {
+        "Untitled"
+    } else {
+        source
+    };
+
+    let mut chars = source.chars();
+    let short: String = chars.by_ref().take(22).collect();
+
+    if chars.next().is_some() {
+        format!("{short}…")
+    } else {
+        short
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn install_chip_css(settings: &ChipSettings) -> Result<(), String> {
+    let provider = gtk::CssProvider::new();
+
+    let css = format!(
+        "
+        #stickyflow-chip-root {{
+            background-color: #fff1a8;
+            border-radius: 7px;
+        }}
+
+        #stickyflow-chip-drag {{
+            color: #756c46;
+            font-size: {}px;
+        }}
+
+        #stickyflow-chip-title {{
+            color: #29261e;
+            font-size: {}px;
+            font-weight: 600;
+        }}
+
+        #stickyflow-chip-arrow {{
+            color: #756c46;
+            font-size: {}px;
+        }}
+        ",
+        settings.font_size,
+        settings.font_size,
+        settings.font_size + 1,
+    );
+
+    provider
+        .load_from_data(css.as_bytes())
+        .map_err(|error| error.to_string())?;
+
+    if let Some(screen) = gtk::gdk::Screen::default() {
+        gtk::StyleContext::add_provider_for_screen(
+            &screen,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn calculate_chip_width(title: &str, settings: &ChipSettings) -> i32 {
+    if !settings.auto_width {
+        return settings
+            .fixed_width
+            .clamp(settings.min_width, settings.max_width);
+    }
+
+    let display_title = compact_chip_title(title);
+
+    let probe = gtk::Label::new(Some(&display_title));
+    probe.set_widget_name("stickyflow-chip-title");
+    probe.show();
+
+    let (_, natural_width) = probe.preferred_width();
+
+    (natural_width + 42).clamp(settings.min_width, settings.max_width)
+}
+
+#[cfg(target_os = "linux")]
+fn show_chip_window(
+    app: &tauri::AppHandle,
+    note: &Note,
+    preferences: &StickyPreferences,
+) -> Result<(), String> {
+    let label = sticky_chip_label(&note.id);
+
+    let settings = load_chip_settings(app)?;
+    install_chip_css(&settings)?;
+
+    let chip_width = calculate_chip_width(&note.title, &settings);
+
+    // Existing native chip: resize it immediately when Settings change.
+    if let Some(window) = app.get_window(&label) {
+        window
+            .set_size(tauri::LogicalSize::new(
+                chip_width as f64,
+                settings.height as f64,
+            ))
+            .map_err(|error| error.to_string())?;
+
+        if let Ok(gtk_window) = window.gtk_window() {
+            gtk_window.resize(chip_width, settings.height);
+        }
+
+        if let (Some(x), Some(y)) = (preferences.compact_x, preferences.compact_y) {
+            let _ = window.set_position(tauri::LogicalPosition::new(x as f64, y as f64));
+        }
+
+        window.show().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let builder_min_width = if settings.auto_width {
+        settings.min_width
+    } else {
+        chip_width
+    };
+
+    let builder_max_width = if settings.auto_width {
+        settings.max_width
+    } else {
+        chip_width
+    };
+
+    // Raw Tauri Window: no WebKitGTK / 200x200 WebView minimum.
+    let window = WindowBuilder::new(app, &label)
+        .title(&note.title)
+        .inner_size(chip_width as f64, settings.height as f64)
+        .min_inner_size(builder_min_width as f64, settings.height as f64)
+        .max_inner_size(builder_max_width as f64, settings.height as f64)
+        .resizable(false)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .focusable(false)
+        .visible(false)
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let default_vbox = window.default_vbox().map_err(|error| error.to_string())?;
+
+    let gtk_window = window.gtk_window().map_err(|error| error.to_string())?;
+
+    let root_event = gtk::EventBox::new();
+    root_event.set_visible_window(true);
+    root_event.set_widget_name("stickyflow-chip-root");
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+
+    // Dedicated draggable area.
+    let drag_event = gtk::EventBox::new();
+    drag_event.set_visible_window(false);
+    drag_event.set_size_request(16, settings.height);
+
+    drag_event.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
+
+    let drag_label = gtk::Label::new(Some("⋮"));
+    drag_label.set_widget_name("stickyflow-chip-drag");
+    drag_label.set_xalign(0.5);
+    drag_event.add(&drag_label);
+
+    // Clickable body opens expanded sticky.
+    let body_event = gtk::EventBox::new();
+    body_event.set_visible_window(false);
+
+    body_event.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
+
+    let body = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+
+    let display_title = compact_chip_title(&note.title);
+
+    let title_label = gtk::Label::new(Some(&display_title));
+    title_label.set_widget_name("stickyflow-chip-title");
+    title_label.set_xalign(0.0);
+
+    let arrow = gtk::Label::new(Some("›"));
+    arrow.set_widget_name("stickyflow-chip-arrow");
+
+    body.pack_start(&title_label, true, true, 5);
+
+    body.pack_end(&arrow, false, false, 5);
+
+    body_event.add(&body);
+
+    row.pack_start(&drag_event, false, false, 0);
+
+    row.pack_start(&body_event, true, true, 0);
+
+    root_event.add(&row);
+
+    default_vbox.pack_start(&root_event, true, true, 0);
+
+    root_event.show_all();
+
+    window
+        .set_size(tauri::LogicalSize::new(
+            chip_width as f64,
+            settings.height as f64,
+        ))
+        .map_err(|error| error.to_string())?;
+
+    gtk_window.resize(chip_width, settings.height);
+
+    if let (Some(x), Some(y)) = (preferences.compact_x, preferences.compact_y) {
+        window
+            .set_position(tauri::LogicalPosition::new(x as f64, y as f64))
+            .map_err(|error| error.to_string())?;
+    }
+
+    let window_for_drag = window.clone();
+
+    drag_event.connect_button_press_event(move |_, event| {
+        if event.button() == 1 {
+            let _ = window_for_drag.start_dragging();
+        }
+
+        gtk::glib::Propagation::Stop
+    });
+
+    let app_for_expand = app.clone();
+    let id_for_expand = note.id.clone();
+
+    body_event.connect_button_press_event(move |_, event| {
+        if event.button() == 1 {
+            let state = app_for_expand.state::<AppState>();
+
+            let _ = set_sticky_compact_inner(&app_for_expand, state.inner(), &id_for_expand, false);
+        }
+
+        gtk::glib::Propagation::Stop
+    });
 
     window.show().map_err(|error| error.to_string())?;
 
+    gtk_window.resize(chip_width, settings.height);
+
+    if let (Some(x), Some(y)) = (preferences.compact_x, preferences.compact_y) {
+        let _ = window.set_position(tauri::LogicalPosition::new(x as f64, y as f64));
+    }
+
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn show_chip_window(
+    app: &tauri::AppHandle,
+    note: &Note,
+    preferences: &StickyPreferences,
+) -> Result<(), String> {
+    let label = sticky_chip_label(&note.id);
+
+    if let Some(window) = app.get_webview_window(&label) {
+        if let (Some(x), Some(y)) = (preferences.compact_x, preferences.compact_y) {
+            let _ = window.set_position(tauri::LogicalPosition::new(x as f64, y as f64));
+        }
+
+        window.show().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        &label,
+        WebviewUrl::App(format!("?sticky={}&mode=chip", note.id).into()),
+    )
+    .title(&note.title)
+    .inner_size(90.0, 26.0)
+    .resizable(false)
+    .decorations(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .focusable(false)
+    .visible(false)
+    .build()
+    .map_err(|error| error.to_string())?;
+
+    if let (Some(x), Some(y)) = (preferences.compact_x, preferences.compact_y) {
+        let _ = window.set_position(tauri::LogicalPosition::new(x as f64, y as f64));
+    }
+
+    window.show().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn show_sticky_window(app: &tauri::AppHandle, note: &Note) -> Result<(), String> {
+    let preferences = load_sticky_preferences(app, &note.id)?;
+
+    if preferences.compact {
+        show_chip_window(app, note, &preferences)
+    } else {
+        show_expanded_window(app, note, &preferences)
+    }
+}
+
+fn save_window_geometry(app: &tauri::AppHandle, id: &str, mode: &str) -> Result<(), String> {
+    let label = match mode {
+        "chip" => sticky_chip_label(id),
+        "expanded" => sticky_expanded_label(id),
+        _ => return Err("Invalid sticky mode.".into()),
+    };
+
+    let Some(window) = app.get_window(&label) else {
+        return Ok(());
+    };
+
+    let scale = window.scale_factor().map_err(|error| error.to_string())?;
+
+    let physical_position = window.outer_position().map_err(|error| error.to_string())?;
+
+    let position = physical_position.to_logical::<f64>(scale);
+
+    let connection = open_database(app)?;
+
+    if mode == "chip" {
+        connection
+            .execute(
+                "UPDATE notes
+                 SET compact_x = ?2,
+                     compact_y = ?3
+                 WHERE id = ?1",
+                params![id, position.x.round() as i64, position.y.round() as i64,],
+            )
+            .map_err(|error| error.to_string())?;
+    } else {
+        let physical_size = window.inner_size().map_err(|error| error.to_string())?;
+
+        let size = physical_size.to_logical::<f64>(scale);
+
+        connection
+            .execute(
+                "UPDATE notes
+                 SET expanded_x = ?2,
+                     expanded_y = ?3,
+                     expanded_width = ?4,
+                     expanded_height = ?5
+                 WHERE id = ?1",
+                params![
+                    id,
+                    position.x.round() as i64,
+                    position.y.round() as i64,
+                    size.width.round().max(260.0) as i64,
+                    size.height.round().max(180.0) as i64,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn get_chip_settings(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<ChipSettings, String> {
+    let _key = current_master_key(&state)?;
+    load_chip_settings(&app)
+}
+
+fn refresh_visible_compact_chips(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
+    for id in persisted_sticky_ids(app)? {
+        let preferences = load_sticky_preferences(app, &id)?;
+
+        if !preferences.compact {
+            continue;
+        }
+
+        if let Ok(note) = load_note_by_id(app, state, &id) {
+            let _ = show_chip_window(app, &note, &preferences);
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn save_chip_settings(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    input: ChipSettings,
+) -> Result<ChipSettings, String> {
+    let _key = current_master_key(&state)?;
+
+    let settings = normalize_chip_settings(input);
+
+    persist_chip_settings(&app, &settings)?;
+
+    refresh_visible_compact_chips(&app, state.inner())?;
+
+    Ok(settings)
+}
+
+#[tauri::command]
+fn reset_chip_settings(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<ChipSettings, String> {
+    let _key = current_master_key(&state)?;
+
+    let settings = ChipSettings::default();
+
+    persist_chip_settings(&app, &settings)?;
+
+    refresh_visible_compact_chips(&app, state.inner())?;
+
+    Ok(settings)
+}
+
+#[tauri::command]
+fn save_sticky_geometry(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    mode: String,
+) -> Result<(), String> {
+    let _key = current_master_key(&state)?;
+    save_window_geometry(&app, &id, &mode)
+}
+
+fn set_sticky_compact_inner(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    id: &str,
+    compact: bool,
+) -> Result<(), String> {
+    let _key = current_master_key(state)?;
+    let note = load_note_by_id(app, state, id)?;
+
+    if compact {
+        let _ = save_window_geometry(app, id, "expanded");
+
+        if let Some(window) = app.get_window(&sticky_expanded_label(id)) {
+            let _ = window.hide();
+        }
+
+        let connection = open_database(app)?;
+
+        connection
+            .execute(
+                "UPDATE notes
+                 SET sticky_compact = 1,
+                     compact_x = COALESCE(compact_x, expanded_x),
+                     compact_y = COALESCE(compact_y, expanded_y)
+                 WHERE id = ?1",
+                params![id],
+            )
+            .map_err(|error| error.to_string())?;
+
+        let preferences = load_sticky_preferences(app, id)?;
+        show_chip_window(app, &note, &preferences)?;
+    } else {
+        let _ = save_window_geometry(app, id, "chip");
+
+        if let Some(window) = app.get_window(&sticky_chip_label(id)) {
+            let _ = window.hide();
+        }
+
+        let connection = open_database(app)?;
+
+        connection
+            .execute(
+                "UPDATE notes
+                 SET sticky_compact = 0,
+                     expanded_x = COALESCE(expanded_x, compact_x),
+                     expanded_y = COALESCE(expanded_y, compact_y)
+                 WHERE id = ?1",
+                params![id],
+            )
+            .map_err(|error| error.to_string())?;
+
+        let preferences = load_sticky_preferences(app, id)?;
+        show_expanded_window(app, &note, &preferences)?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn set_sticky_compact(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    compact: bool,
+) -> Result<(), String> {
+    set_sticky_compact_inner(&app, state.inner(), &id, compact)
 }
 
 fn set_sticky_open(app: &tauri::AppHandle, id: &str, open: bool) -> Result<(), String> {
@@ -667,6 +1472,7 @@ fn set_sticky_open(app: &tauri::AppHandle, id: &str, open: bool) -> Result<(), S
 
 fn persisted_sticky_ids(app: &tauri::AppHandle) -> Result<Vec<String>, String> {
     let connection = open_database(app)?;
+
     let mut statement = connection
         .prepare(
             "SELECT id
@@ -721,22 +1527,20 @@ fn close_sticky_window(
 ) -> Result<(), String> {
     let _key = current_master_key(&state)?;
 
-    // Save last known position/size before destroying the window.
-    let _ = app.save_window_state(StateFlags::POSITION | StateFlags::SIZE);
+    let _ = save_window_geometry(&app, &id, "expanded");
+    let _ = save_window_geometry(&app, &id, "chip");
 
     set_sticky_open(&app, &id, false)?;
 
-    if let Some(window) = app.get_webview_window(&sticky_window_label(&id)) {
+    if let Some(window) = app.get_webview_window(&sticky_expanded_label(&id)) {
+        let _ = window.close();
+    }
+
+    if let Some(window) = app.get_window(&sticky_chip_label(&id)) {
         let _ = window.close();
     }
 
     Ok(())
-}
-
-#[tauri::command]
-fn save_sticky_window_state(app: tauri::AppHandle) -> Result<(), String> {
-    app.save_window_state(StateFlags::POSITION | StateFlags::SIZE)
-        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -883,7 +1687,8 @@ fn delete_note(
 ) -> Result<(), String> {
     let _key = current_master_key(&state)?;
     let connection = open_database(&app)?;
-    let window_label = sticky_window_label(&id);
+    let expanded_label = sticky_expanded_label(&id);
+    let chip_label = sticky_chip_label(&id);
 
     let affected = connection
         .execute("DELETE FROM notes WHERE id = ?1", params![&id])
@@ -893,7 +1698,11 @@ fn delete_note(
         return Err("Note not found.".into());
     }
 
-    if let Some(window) = app.get_webview_window(&window_label) {
+    if let Some(window) = app.get_webview_window(&expanded_label) {
+        let _ = window.close();
+    }
+
+    if let Some(window) = app.get_window(&chip_label) {
         let _ = window.close();
     }
 
@@ -904,7 +1713,14 @@ fn delete_note(
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                // StickyFlow persists sticky/chip geometry in SQLite.
+                // Do not let the window-state plugin restore stale sizes
+                // or positions for sticky companion windows.
+                .with_filter(|label| !label.starts_with("sticky-"))
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             security_status,
@@ -916,7 +1732,11 @@ pub fn run() {
             get_note,
             open_sticky_window,
             close_sticky_window,
-            save_sticky_window_state,
+            set_sticky_compact,
+            get_chip_settings,
+            save_chip_settings,
+            reset_chip_settings,
+            save_sticky_geometry,
             create_note,
             update_note,
             delete_note

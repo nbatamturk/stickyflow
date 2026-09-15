@@ -3437,6 +3437,7 @@ dependencies = [
  "aes-gcm",
  "argon2",
  "base64 0.22.1",
+ "gtk",
  "rand_core",
  "rusqlite",
  "serde",

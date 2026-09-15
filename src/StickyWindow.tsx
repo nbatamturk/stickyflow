@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import "./StickyWindow.css";
 
 type Note = {
@@ -16,12 +18,14 @@ type Note = {
 
 type Props = {
   noteId: string;
+  mode: "expanded" | "chip";
 };
 
-export default function StickyWindow({ noteId }: Props) {
+export default function StickyWindow({ noteId, mode }: Props) {
   const [note, setNote] = useState<Note | null>(null);
   const [error, setError] = useState("");
   const [alwaysOnTop, setAlwaysOnTop] = useState(true);
+  const chipTitleRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     void loadNote();
@@ -31,51 +35,108 @@ export default function StickyWindow({ noteId }: Props) {
     const currentWindow = getCurrentWindow();
     let unlistenMoved: (() => void) | undefined;
     let unlistenResized: (() => void) | undefined;
-    let saveTimer: ReturnType<typeof setTimeout> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
 
-    const scheduleSave = () => {
-      if (saveTimer) {
-        clearTimeout(saveTimer);
+    const saveGeometry = () => {
+      if (timer) {
+        clearTimeout(timer);
       }
 
-      saveTimer = setTimeout(() => {
-        void invoke("save_sticky_window_state");
-      }, 150);
+      timer = setTimeout(() => {
+        void invoke("save_sticky_geometry", {
+          id: noteId,
+          mode,
+        });
+      }, 250);
     };
 
     void (async () => {
-      const moved = await currentWindow.onMoved(scheduleSave);
+      const moved = await currentWindow.onMoved(saveGeometry);
+
       if (disposed) {
         moved();
       } else {
         unlistenMoved = moved;
       }
 
-      const resized = await currentWindow.onResized(scheduleSave);
-      if (disposed) {
-        resized();
-      } else {
-        unlistenResized = resized;
+      if (mode === "expanded") {
+        const resized = await currentWindow.onResized(saveGeometry);
+
+        if (disposed) {
+          resized();
+        } else {
+          unlistenResized = resized;
+        }
       }
     })();
 
     return () => {
       disposed = true;
-      if (saveTimer) {
-        clearTimeout(saveTimer);
+
+      if (timer) {
+        clearTimeout(timer);
       }
+
       unlistenMoved?.();
       unlistenResized?.();
     };
-  }, []);
+  }, [noteId, mode]);
 
+  useLayoutEffect(() => {
+    if (mode !== "chip" || !note || !chipTitleRef.current) {
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      const titleWidth =
+        chipTitleRef.current?.getBoundingClientRect().width ?? 0;
+
+      // drag handle + paddings + chevron + borders
+      const chromeWidth = 40;
+
+      const width = Math.max(
+        64,
+        Math.min(200, Math.ceil(titleWidth + chromeWidth)),
+      );
+
+      void (async () => {
+        const size = new LogicalSize(width, 28);
+
+        // On Linux/Wry the embedded webview can retain its own default
+        // 200x200 bounds. Shrink the webview first, then its native window.
+        await getCurrentWebview().setSize(size);
+        await getCurrentWindow().setSize(size);
+      })();
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [mode, note?.title]);
 
   async function loadNote() {
     try {
       setError("");
       const loaded = await invoke<Note>("get_note", { id: noteId });
       setNote(loaded);
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
+  }
+
+  async function switchMode(compact: boolean) {
+    try {
+      await invoke("set_sticky_compact", {
+        id: noteId,
+        compact,
+      });
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
+  }
+
+  async function startDragging() {
+    try {
+      await getCurrentWindow().startDragging();
     } catch (cause) {
       setError(toMessage(cause));
     }
@@ -104,15 +165,37 @@ export default function StickyWindow({ noteId }: Props) {
       <main className="sticky-shell sticky-error">
         <strong>StickyFlow</strong>
         <p>{error}</p>
-        <button onClick={() => void closeWindow()} type="button">
-          Close
-        </button>
       </main>
     );
   }
 
   if (!note) {
     return <main className="sticky-shell">Decrypting note…</main>;
+  }
+
+  if (mode === "chip") {
+    return (
+      <main className={`sticky-chip sticky-${note.color}`}>
+        <button
+          className="sticky-chip-drag"
+          onMouseDown={() => void startDragging()}
+          title="Move sticky"
+          type="button"
+        >
+          ⋮
+        </button>
+
+        <button
+          className="sticky-chip-open"
+          onClick={() => void switchMode(false)}
+          title={`Open ${note.title}`}
+          type="button"
+        >
+          <strong ref={chipTitleRef}>{note.title}</strong>
+          <span>›</span>
+        </button>
+      </main>
+    );
   }
 
   return (
@@ -124,9 +207,18 @@ export default function StickyWindow({ noteId }: Props) {
         </div>
 
         <div className="sticky-actions">
+          <button
+            onClick={() => void switchMode(true)}
+            title="Collapse"
+            type="button"
+          >
+            ▂
+          </button>
+
           <button onClick={() => void toggleAlwaysOnTop()} type="button">
             {alwaysOnTop ? "Top ✓" : "Top"}
           </button>
+
           <button onClick={() => void closeWindow()} type="button">
             ×
           </button>
