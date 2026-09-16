@@ -615,6 +615,95 @@ fn verify_password(
 }
 
 #[tauri::command]
+fn change_password(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    mut current_password: String,
+    mut new_password: String,
+) -> Result<(), String> {
+    let result = (|| {
+        if new_password.chars().count() < 8 {
+            return Err("New password must be at least 8 characters.".into());
+        }
+
+        if current_password == new_password {
+            return Err("New password must be different from the current password.".into());
+        }
+
+        // Requiring the in-memory master key means password changes are only
+        // possible from an already-unlocked session.
+        let master_key = current_master_key(&state)?;
+
+        let Some(config) = read_security_config(&app)? else {
+            return Err("Security has not been configured.".into());
+        };
+
+        if !config.enabled {
+            return Err("Password lock is not enabled.".into());
+        }
+
+        let Some(stored_hash) = config.password_hash.as_deref() else {
+            return Err("Password lock is enabled but no password hash is stored.".into());
+        };
+
+        let parsed_hash = PasswordHash::new(stored_hash).map_err(|error| error.to_string())?;
+        if Argon2::default()
+            .verify_password(current_password.as_bytes(), &parsed_hash)
+            .is_err()
+        {
+            return Err("Current password is incorrect.".into());
+        }
+
+        let (Some(kdf_salt), Some(wrapped_master_key)) = (
+            config.kdf_salt.as_deref(),
+            config.wrapped_master_key.as_deref(),
+        ) else {
+            return Err("Stored password protection data is incomplete.".into());
+        };
+
+        // Verify that the current password also unwraps the same DEK that is
+        // loaded in memory. The note ciphertext itself is intentionally not
+        // touched by a password-only change.
+        let stored_master_key = Zeroizing::new(
+            unwrap_master_key(&current_password, kdf_salt, wrapped_master_key)
+                .map_err(|_| "Current password is incorrect or security data is invalid.".to_string())?,
+        );
+
+        if stored_master_key.as_slice() != master_key.as_slice() {
+            return Err("Stored encryption key does not match the active session.".into());
+        }
+
+        let password_salt = SaltString::generate(&mut OsRng);
+        let password_hash = Argon2::default()
+            .hash_password(new_password.as_bytes(), &password_salt)
+            .map_err(|error| error.to_string())?
+            .to_string();
+
+        // wrap_master_key creates a fresh KDF salt and AES-GCM nonce while
+        // preserving the existing 256-bit master key.
+        let (new_kdf_salt, new_wrapped_master_key) =
+            wrap_master_key(&new_password, master_key.as_slice())?;
+
+        // write_security_config uses a private temporary file followed by an
+        // atomic rename, so the previous valid config remains intact if the
+        // replacement cannot be completed.
+        write_security_config(
+            &app,
+            &SecurityConfig {
+                enabled: true,
+                password_hash: Some(password_hash),
+                kdf_salt: Some(new_kdf_salt),
+                wrapped_master_key: Some(new_wrapped_master_key),
+            },
+        )
+    })();
+
+    current_password.zeroize();
+    new_password.zeroize();
+    result
+}
+
+#[tauri::command]
 fn lock_session(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     // Persist our own per-mode geometry before closing any sticky window.
     // Do not depend only on frontend move/resize events: the user may move
@@ -1993,6 +2082,7 @@ pub fn run() {
             setup_password,
             skip_password_setup,
             verify_password,
+            change_password,
             lock_session,
             list_notes,
             get_note,
