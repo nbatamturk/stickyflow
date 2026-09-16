@@ -738,3 +738,116 @@ textarea:focus-visible {
   margin-top: 11px;
 }
 
+
+
+/* Data & portability */
+
+.data-portability-copy {
+  max-width: 780px;
+  margin: 10px 0 0;
+  font-size: 12px;
+}
+
+.data-portability-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 15px;
+}
+
+.data-portability-block {
+  display: grid;
+  align-content: start;
+  gap: 11px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-strong);
+}
+
+.data-portability-block strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.data-portability-block p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.data-password-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.data-password-form input {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  outline: none;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.data-password-form input:focus {
+  border-color: rgba(67, 91, 76, 0.48);
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
+.restore-button {
+  border-color: rgba(164, 75, 67, 0.28);
+  color: var(--danger);
+}
+
+.plaintext-warning {
+  display: grid;
+  gap: 4px;
+  margin-top: 12px;
+  padding: 11px 12px;
+  border: 1px solid rgba(154, 103, 28, 0.24);
+  border-radius: 10px;
+  background: rgba(181, 128, 49, 0.08);
+}
+
+.plaintext-warning strong {
+  color: #875a18;
+  font-size: 12px;
+}
+
+.plaintext-warning span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.data-portability-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.data-portability-message {
+  margin-top: 11px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .data-portability-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .plaintext-warning strong {
+    color: #e0b76e;
+  }
+}
