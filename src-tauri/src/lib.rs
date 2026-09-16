@@ -22,6 +22,7 @@ use std::{
 };
 
 use tauri::{window::WindowBuilder, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
@@ -2063,10 +2064,40 @@ fn delete_note(
     Ok(())
 }
 
+
+#[tauri::command]
+fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_autostart_enabled(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<bool, String> {
+    let manager = app.autolaunch();
+
+    if enabled {
+        manager.enable().map_err(|error| error.to_string())?;
+    } else {
+        manager.disable().map_err(|error| error.to_string())?;
+    }
+
+    manager
+        .is_enabled()
+        .map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec![]),
+        ))
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 // StickyFlow persists sticky/chip geometry in SQLite.
@@ -2078,6 +2109,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
+            autostart_status,
+            set_autostart_enabled,
             security_status,
             setup_password,
             skip_password_setup,

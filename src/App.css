@@ -681,3 +681,60 @@ textarea:focus-visible {
     color: var(--success);
   }
 }
+
+
+/* System / autostart */
+
+.autostart-settings-copy {
+  max-width: 760px;
+  margin: 10px 0 0;
+  font-size: 12px;
+}
+
+.autostart-setting-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  margin-top: 15px;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-strong);
+  cursor: pointer;
+}
+
+.autostart-setting-toggle input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+.autostart-setting-toggle > span {
+  display: grid;
+  gap: 4px;
+}
+
+.autostart-setting-toggle strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.autostart-setting-toggle small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.autostart-badge-enabled {
+  border-color: rgba(77, 105, 79, 0.18);
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.autostart-settings-message {
+  margin-top: 11px;
+}
+

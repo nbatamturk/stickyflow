@@ -80,6 +80,9 @@ function App() {
     useState<ChipSettings>(defaultChipSettings);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState("");
+  const [autostartEnabled, setAutostartEnabled] = useState(false);
+  const [autostartBusy, setAutostartBusy] = useState(false);
+  const [autostartMessage, setAutostartMessage] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmNewPassword, setConfirmNewPassword] = useState("");
@@ -98,6 +101,7 @@ function App() {
     if (view === "workspace") {
       void loadNotes();
       void loadChipSettings();
+      void loadAutostartStatus();
     } else {
       setNotes([]);
       setDraft(emptyDraft);
@@ -556,6 +560,44 @@ function App() {
     }
   }
 
+
+  async function loadAutostartStatus() {
+    try {
+      const enabled = await invoke<boolean>("autostart_status");
+      setAutostartEnabled(enabled);
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
+  }
+
+  async function handleAutostartToggle(enabled: boolean) {
+    const previous = autostartEnabled;
+
+    setAutostartEnabled(enabled);
+    setAutostartBusy(true);
+    setAutostartMessage("");
+    setError("");
+
+    try {
+      const actual = await invoke<boolean>(
+        "set_autostart_enabled",
+        { enabled },
+      );
+
+      setAutostartEnabled(actual);
+      setAutostartMessage(
+        actual
+          ? "StickyFlow will start automatically when you log in."
+          : "Automatic start is disabled.",
+      );
+    } catch (cause) {
+      setAutostartEnabled(previous);
+      setError(toMessage(cause));
+    } finally {
+      setAutostartBusy(false);
+    }
+  }
+
   async function handleChangePassword(event: FormEvent) {
     event.preventDefault();
     setPasswordChangeError("");
@@ -931,6 +973,53 @@ function App() {
                 </button>
               </div>
             </form>
+          </div>
+
+
+          <div className="settings-card autostart-settings-card">
+            <div className="settings-card-heading">
+              <div>
+                <p className="eyebrow">SYSTEM</p>
+                <h4>Start at login</h4>
+              </div>
+              <span
+                className={`settings-badge ${
+                  autostartEnabled ? "autostart-badge-enabled" : ""
+                }`}
+              >
+                {autostartEnabled ? "On" : "Off"}
+              </span>
+            </div>
+
+            <p className="muted autostart-settings-copy">
+              Start StickyFlow automatically when you sign in to your desktop.
+              If password lock is enabled, StickyFlow still starts locked and
+              does not restore your notes or stickies until you unlock it.
+            </p>
+
+            <label className="autostart-setting-toggle">
+              <input
+                checked={autostartEnabled}
+                disabled={autostartBusy}
+                onChange={(event) =>
+                  void handleAutostartToggle(event.currentTarget.checked)
+                }
+                type="checkbox"
+              />
+              <span>
+                <strong>Start StickyFlow when I log in</strong>
+                <small>
+                  You can turn this off at any time. StickyFlow reads the
+                  actual operating-system registration.
+                </small>
+              </span>
+            </label>
+
+            {autostartMessage && (
+              <p className="settings-success autostart-settings-message">
+                {autostartMessage}
+              </p>
+            )}
           </div>
 
           {lockEnabled ? (
