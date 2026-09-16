@@ -456,3 +456,147 @@ button:disabled {
     monospace;
   white-space: pre-wrap;
 }
+
+/* Settings / security */
+
+.settings-panel {
+  width: min(100%, 1040px);
+  margin: 18px auto;
+  padding: 22px;
+  background: var(--surface);
+  box-shadow: 0 18px 50px rgba(65, 55, 35, 0.07);
+}
+
+.settings-card {
+  margin-top: 18px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.settings-card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.settings-card-heading h4 {
+  margin: 5px 0 0;
+  font-size: 17px;
+  letter-spacing: -0.02em;
+}
+
+.settings-badge {
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.security-badge {
+  color: #4f6546;
+  background: rgba(105, 141, 88, 0.1);
+}
+
+.security-settings-copy {
+  margin: 12px 0 0;
+  font-size: 13px;
+}
+
+.security-settings-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.security-settings-form label,
+.chip-settings-form label {
+  display: grid;
+  gap: 7px;
+  color: #4d4942;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.security-settings-form input,
+.chip-settings-form input[type="number"] {
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid #d8d1c4;
+  border-radius: 11px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.9);
+  color: #191918;
+}
+
+.security-settings-form input:focus,
+.chip-settings-form input[type="number"]:focus {
+  border-color: #797268;
+  box-shadow: 0 0 0 3px rgba(77, 73, 66, 0.1);
+}
+
+.security-password-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.security-settings-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.security-settings-success {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(79, 101, 70, 0.1);
+  color: #405638;
+}
+
+@media (max-width: 700px) {
+  .security-password-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-card-heading {
+    align-items: flex-start;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .settings-panel,
+  .settings-card {
+    border-color: var(--border);
+    background: var(--surface);
+  }
+
+  .settings-card {
+    background: rgba(255, 255, 255, 0.035);
+  }
+
+  .security-settings-form label,
+  .chip-settings-form label {
+    color: #d8d2c6;
+  }
+
+  .security-settings-form input,
+  .chip-settings-form input[type="number"] {
+    border-color: #4a463e;
+    background: rgba(17, 17, 15, 0.82);
+    color: #f4f1e9;
+  }
+
+  .security-badge {
+    color: #c2d8b8;
+    background: rgba(118, 159, 100, 0.12);
+  }
+
+  .security-settings-success {
+    color: #c7ddb9;
+    background: rgba(118, 159, 100, 0.12);
+  }
+}
