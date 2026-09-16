@@ -26,6 +26,21 @@ type ChipSettings = {
   fontSize: number;
 };
 
+type DataFileResult = {
+  path: string;
+  noteCount: number;
+};
+
+type RestoreResult = {
+  noteCount: number;
+  passwordEnabled: boolean;
+};
+
+type ImportFileResult = {
+  path: string;
+  imported: number;
+};
+
 type Note = {
   id: string;
   title: string;
@@ -83,6 +98,14 @@ function App() {
   const [autostartEnabled, setAutostartEnabled] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(false);
   const [autostartMessage, setAutostartMessage] = useState("");
+  const [backupPassword, setBackupPassword] = useState("");
+  const [backupConfirmPassword, setBackupConfirmPassword] = useState("");
+  const [restorePassword, setRestorePassword] = useState("");
+  const [dataBusy, setDataBusy] = useState<
+    "backup" | "restore" | "export" | "import" | null
+  >(null);
+  const [dataMessage, setDataMessage] = useState("");
+  const [dataError, setDataError] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmNewPassword, setConfirmNewPassword] = useState("");
@@ -108,6 +131,7 @@ function App() {
       setEditorOpen(false);
       setSettingsOpen(false);
       resetPasswordChangeForm();
+      resetDataPortabilityForm();
     }
   }, [view]);
 
@@ -598,6 +622,130 @@ function App() {
     }
   }
 
+
+
+  async function handleCreateEncryptedBackup(event: FormEvent) {
+    event.preventDefault();
+    setDataError("");
+    setDataMessage("");
+
+    if (backupPassword.length < 8) {
+      setDataError("Backup password must be at least 8 characters.");
+      return;
+    }
+    if (backupPassword !== backupConfirmPassword) {
+      setDataError("Backup passwords do not match.");
+      return;
+    }
+
+    setDataBusy("backup");
+    try {
+      const result = await invoke<DataFileResult | null>(
+        "create_encrypted_backup",
+        { backupPassword },
+      );
+      if (result) {
+        setDataMessage(
+          `Encrypted backup saved (${result.noteCount} notes): ${result.path}`,
+        );
+      }
+    } catch (cause) {
+      setDataError(toMessage(cause));
+    } finally {
+      setBackupPassword("");
+      setBackupConfirmPassword("");
+      setDataBusy(null);
+    }
+  }
+
+  async function handleRestoreEncryptedBackup(event: FormEvent) {
+    event.preventDefault();
+    setDataError("");
+    setDataMessage("");
+
+    if (restorePassword.length < 8) {
+      setDataError("Backup password must be at least 8 characters.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Restore will replace the current StickyFlow notes, local settings and security state with the selected backup. Continue?",
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setDataBusy("restore");
+    try {
+      const result = await invoke<RestoreResult | null>(
+        "restore_encrypted_backup",
+        { backupPassword: restorePassword },
+      );
+      if (result) {
+        window.alert(
+          `Restore complete: ${result.noteCount} notes. StickyFlow will reload the restored security state now.`,
+        );
+        setSettingsOpen(false);
+        setError("");
+        setView("loading");
+        await initializeSecurity();
+      }
+    } catch (cause) {
+      setDataError(toMessage(cause));
+    } finally {
+      setRestorePassword("");
+      setDataBusy(null);
+    }
+  }
+
+  async function handlePlaintextExport() {
+    setDataError("");
+    setDataMessage("");
+    setDataBusy("export");
+
+    try {
+      const result = await invoke<DataFileResult | null>("export_plaintext_json");
+      if (result) {
+        setDataMessage(
+          `Plaintext JSON exported (${result.noteCount} notes): ${result.path}`,
+        );
+      }
+    } catch (cause) {
+      setDataError(toMessage(cause));
+    } finally {
+      setDataBusy(null);
+    }
+  }
+
+  async function handlePlaintextImport() {
+    setDataError("");
+    setDataMessage("");
+    setDataBusy("import");
+
+    try {
+      const result = await invoke<ImportFileResult | null>("import_plaintext_json");
+      if (result) {
+        await loadNotes();
+        setDataMessage(
+          `Imported ${result.imported} notes from ${result.path}. Imported notes were encrypted with the current StickyFlow key.`,
+        );
+      }
+    } catch (cause) {
+      setDataError(toMessage(cause));
+    } finally {
+      setDataBusy(null);
+    }
+  }
+
+  function resetDataPortabilityForm() {
+    setBackupPassword("");
+    setBackupConfirmPassword("");
+    setRestorePassword("");
+    setDataBusy(null);
+    setDataMessage("");
+    setDataError("");
+  }
+
   async function handleChangePassword(event: FormEvent) {
     event.preventDefault();
     setPasswordChangeError("");
@@ -772,12 +920,15 @@ function App() {
                 const next = !current;
                 if (!next) {
                   resetPasswordChangeForm();
+                  resetDataPortabilityForm();
                 }
                 return next;
               });
               setSettingsMessage("");
               setPasswordChangeError("");
               setPasswordChangeMessage("");
+              setDataError("");
+              setDataMessage("");
             }}
             type="button"
           >
@@ -803,6 +954,7 @@ function App() {
               onClick={() => {
                 setSettingsOpen(false);
                 resetPasswordChangeForm();
+                resetDataPortabilityForm();
                 setSettingsMessage("");
               }}
               type="button"
@@ -1019,6 +1171,138 @@ function App() {
               <p className="settings-success autostart-settings-message">
                 {autostartMessage}
               </p>
+            )}
+          </div>
+
+
+
+          <div className="settings-card data-portability-card">
+            <div className="settings-card-heading">
+              <div>
+                <p className="eyebrow">DATA & PORTABILITY</p>
+                <h4>Backup, restore, export & import</h4>
+              </div>
+              <span className="settings-badge">Local files</span>
+            </div>
+
+            <p className="muted data-portability-copy">
+              Encrypted backups are for disaster recovery. The backup password is
+              separate from your StickyFlow login password and is required to restore
+              the file. OS autostart registration is intentionally not included.
+            </p>
+
+            <div className="data-portability-grid">
+              <form
+                className="data-portability-block data-password-form"
+                noValidate
+                onSubmit={handleCreateEncryptedBackup}
+              >
+                <div>
+                  <strong>Create encrypted backup</strong>
+                  <p>
+                    Saves notes, StickyFlow settings and the security state inside an
+                    AES-256-GCM encrypted backup envelope.
+                  </p>
+                </div>
+
+                <label>
+                  Backup password
+                  <input
+                    autoComplete="new-password"
+                    onChange={(event) => setBackupPassword(event.currentTarget.value)}
+                    placeholder="At least 8 characters"
+                    type="password"
+                    value={backupPassword}
+                  />
+                </label>
+
+                <label>
+                  Confirm backup password
+                  <input
+                    autoComplete="new-password"
+                    onChange={(event) =>
+                      setBackupConfirmPassword(event.currentTarget.value)
+                    }
+                    placeholder="Repeat backup password"
+                    type="password"
+                    value={backupConfirmPassword}
+                  />
+                </label>
+
+                <button
+                  className="primary-button"
+                  disabled={dataBusy !== null}
+                  type="submit"
+                >
+                  {dataBusy === "backup" ? "Creating…" : "Create encrypted backup"}
+                </button>
+              </form>
+
+              <form
+                className="data-portability-block data-password-form"
+                noValidate
+                onSubmit={handleRestoreEncryptedBackup}
+              >
+                <div>
+                  <strong>Restore encrypted backup</strong>
+                  <p>
+                    Replaces the current local dataset after validating the backup.
+                    A password-protected backup returns StickyFlow to the lock screen
+                    and uses the app password that existed when that backup was made.
+                  </p>
+                </div>
+
+                <label>
+                  Backup password
+                  <input
+                    autoComplete="off"
+                    onChange={(event) => setRestorePassword(event.currentTarget.value)}
+                    placeholder="Password used for this backup"
+                    type="password"
+                    value={restorePassword}
+                  />
+                </label>
+
+                <button
+                  className="ghost-button restore-button"
+                  disabled={dataBusy !== null || restorePassword.length === 0}
+                  type="submit"
+                >
+                  {dataBusy === "restore" ? "Restoring…" : "Restore backup…"}
+                </button>
+              </form>
+            </div>
+
+            <div className="plaintext-warning">
+              <strong>Plaintext export is decrypted.</strong>
+              <span>
+                JSON exports contain readable note titles and contents. Use them only
+                when you intentionally need a portable, unencrypted copy.
+              </span>
+            </div>
+
+            <div className="data-portability-actions">
+              <button
+                className="ghost-button"
+                disabled={dataBusy !== null}
+                onClick={() => void handlePlaintextExport()}
+                type="button"
+              >
+                {dataBusy === "export" ? "Exporting…" : "Export plaintext JSON…"}
+              </button>
+              <button
+                className="ghost-button"
+                disabled={dataBusy !== null}
+                onClick={() => void handlePlaintextImport()}
+                type="button"
+              >
+                {dataBusy === "import" ? "Importing…" : "Import plaintext JSON…"}
+              </button>
+            </div>
+
+            {dataError && <p className="error-message data-portability-message">{dataError}</p>}
+            {dataMessage && (
+              <p className="settings-success data-portability-message">{dataMessage}</p>
             )}
           </div>
 

@@ -23,6 +23,7 @@ use std::{
 
 use tauri::{window::WindowBuilder, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
@@ -2090,6 +2091,789 @@ fn set_autostart_enabled(
         .map_err(|error| error.to_string())
 }
 
+
+
+const BACKUP_FORMAT: &str = "stickyflow-backup";
+const BACKUP_VERSION: u32 = 1;
+const PLAINTEXT_EXPORT_FORMAT: &str = "stickyflow-plaintext-export";
+const PLAINTEXT_EXPORT_VERSION: u32 = 1;
+const MAX_BACKUP_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_IMPORT_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_IMPORT_NOTES: usize = 10_000;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupEnvelope {
+    format: String,
+    version: u32,
+    kdf_salt: String,
+    payload: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupPayload {
+    format: String,
+    version: u32,
+    app_version: String,
+    created_at: i64,
+    security_json: String,
+    local_key: Option<String>,
+    database: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DataFileResult {
+    path: String,
+    note_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreResult {
+    note_count: i64,
+    password_enabled: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortableNote {
+    title: String,
+    content: String,
+    color: String,
+    note_type: String,
+    pinned: bool,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaintextExport {
+    format: String,
+    version: u32,
+    exported_at: i64,
+    warning: String,
+    notes: Vec<PortableNote>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportFileResult {
+    path: String,
+    imported: i64,
+}
+
+struct ValidatedRestore {
+    security_bytes: Vec<u8>,
+    database_bytes: Vec<u8>,
+    local_key: Option<Zeroizing<Vec<u8>>>,
+    password_enabled: bool,
+    note_count: i64,
+}
+
+fn ensure_backup_password(password: &str) -> Result<(), String> {
+    if password.chars().count() < 8 {
+        return Err("Backup password must be at least 8 characters.".into());
+    }
+    Ok(())
+}
+
+fn ensure_file_extension(mut path: PathBuf, extension: &str) -> PathBuf {
+    if path.extension().and_then(|value| value.to_str()) != Some(extension) {
+        path.set_extension(extension);
+    }
+    path
+}
+
+fn read_file_with_limit(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    if metadata.len() > limit {
+        return Err(format!(
+            "Selected file is too large ({} bytes; maximum is {} bytes).",
+            metadata.len(),
+            limit
+        ));
+    }
+    fs::read(path).map_err(|error| error.to_string())
+}
+
+fn sqlite_sidecar_path(database: &Path, suffix: &str) -> PathBuf {
+    let mut value = database.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn persist_open_sticky_geometry(app: &tauri::AppHandle) {
+    if let Ok(ids) = persisted_sticky_ids(app) {
+        for id in ids {
+            let _ = save_window_geometry(app, &id, "expanded");
+            let _ = save_window_geometry(app, &id, "chip");
+        }
+    }
+}
+
+fn close_sticky_windows_for_dataset_switch(app: &tauri::AppHandle) {
+    persist_open_sticky_geometry(app);
+    let _ = app.save_window_state(StateFlags::POSITION | StateFlags::SIZE);
+
+    for (label, window) in app.windows() {
+        if label.starts_with("sticky-") {
+            let _ = window.close();
+        }
+    }
+}
+
+fn create_database_snapshot(app: &tauri::AppHandle) -> Result<(Vec<u8>, i64), String> {
+    persist_open_sticky_geometry(app);
+
+    let snapshot_path = app_data_dir(app)?.join(format!(
+        ".backup-snapshot-{}.db",
+        Uuid::new_v4()
+    ));
+    let _ = fs::remove_file(&snapshot_path);
+
+    let result = (|| {
+        let connection = open_database(app)?;
+        let note_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+
+        connection
+            .execute(
+                "VACUUM INTO ?1",
+                params![snapshot_path.to_string_lossy().into_owned()],
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let bytes = fs::read(&snapshot_path).map_err(|error| error.to_string())?;
+        Ok((bytes, note_count))
+    })();
+
+    let _ = fs::remove_file(&snapshot_path);
+    result
+}
+
+fn build_backup_envelope(
+    app: &tauri::AppHandle,
+    backup_password: &str,
+) -> Result<(Vec<u8>, i64), String> {
+    ensure_backup_password(backup_password)?;
+
+    let config = read_security_config(app)?
+        .ok_or_else(|| "StickyFlow security is not configured.".to_string())?;
+    let security_bytes = fs::read(security_config_path(app)?)
+        .map_err(|error| error.to_string())?;
+
+    let local_key = if config.enabled {
+        None
+    } else {
+        let key = fs::read(local_key_path(app)?).map_err(|error| error.to_string())?;
+        if key.len() != MASTER_KEY_LEN {
+            return Err("The local encryption key file is invalid.".into());
+        }
+        Some(BASE64.encode(key))
+    };
+
+    let (database_bytes, note_count) = create_database_snapshot(app)?;
+
+    let mut payload = BackupPayload {
+        format: BACKUP_FORMAT.to_string(),
+        version: BACKUP_VERSION,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        created_at: now_millis()?,
+        security_json: BASE64.encode(security_bytes),
+        local_key,
+        database: BASE64.encode(database_bytes),
+    };
+
+    let payload_bytes = Zeroizing::new(
+        serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
+    );
+    let salt = generate_random_bytes(KDF_SALT_LEN);
+    let backup_key = derive_kek(backup_password, &salt)?;
+    let encrypted_payload = encrypt_bytes(&backup_key, payload_bytes.as_slice())?;
+
+    if let Some(value) = payload.local_key.as_mut() {
+        value.zeroize();
+    }
+
+    let envelope = BackupEnvelope {
+        format: BACKUP_FORMAT.to_string(),
+        version: BACKUP_VERSION,
+        kdf_salt: BASE64.encode(salt),
+        payload: BASE64.encode(encrypted_payload),
+    };
+
+    let bytes = serde_json::to_vec_pretty(&envelope).map_err(|error| error.to_string())?;
+    Ok((bytes, note_count))
+}
+
+fn decrypt_backup_payload(
+    backup_password: &str,
+    envelope_bytes: &[u8],
+) -> Result<BackupPayload, String> {
+    ensure_backup_password(backup_password)?;
+
+    let envelope: BackupEnvelope = serde_json::from_slice(envelope_bytes)
+        .map_err(|_| "Selected file is not a valid StickyFlow backup.".to_string())?;
+
+    if envelope.format != BACKUP_FORMAT || envelope.version != BACKUP_VERSION {
+        return Err("Unsupported StickyFlow backup format or version.".into());
+    }
+
+    let salt = BASE64
+        .decode(envelope.kdf_salt)
+        .map_err(|_| "StickyFlow backup header is invalid.".to_string())?;
+    let encrypted_payload = BASE64
+        .decode(envelope.payload)
+        .map_err(|_| "StickyFlow backup payload is invalid.".to_string())?;
+    let backup_key = derive_kek(backup_password, &salt)?;
+    let plaintext = Zeroizing::new(
+        decrypt_bytes(&backup_key, &encrypted_payload).map_err(|_| {
+            "Backup password is incorrect or the backup file is corrupted.".to_string()
+        })?,
+    );
+
+    let payload: BackupPayload = serde_json::from_slice(plaintext.as_slice()).map_err(|_| {
+        "Backup password is incorrect or the backup file is corrupted.".to_string()
+    })?;
+
+    if payload.format != BACKUP_FORMAT || payload.version != BACKUP_VERSION {
+        return Err("Unsupported StickyFlow backup payload version.".into());
+    }
+
+    Ok(payload)
+}
+
+fn validate_database_bytes(
+    app: &tauri::AppHandle,
+    database_bytes: &[u8],
+    local_key: Option<&[u8]>,
+) -> Result<i64, String> {
+    let validation_path = app_data_dir(app)?.join(format!(
+        ".restore-validation-{}.db",
+        Uuid::new_v4()
+    ));
+    let _ = fs::remove_file(&validation_path);
+
+    let result = (|| {
+        write_private_file(&validation_path, database_bytes)?;
+        let connection = Connection::open(&validation_path).map_err(|error| error.to_string())?;
+
+        let integrity: String = connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if integrity != "ok" {
+            return Err(format!("Backup database integrity check failed: {integrity}"));
+        }
+
+        let schema_version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if schema_version != 5 {
+            return Err(format!(
+                "Unsupported backup database schema version: {schema_version}"
+            ));
+        }
+
+        let note_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+
+        if let Some(key) = local_key {
+            let mut statement = connection
+                .prepare("SELECT title_cipher, content_cipher FROM notes LIMIT 1")
+                .map_err(|error| error.to_string())?;
+            let mut rows = statement.query([]).map_err(|error| error.to_string())?;
+            if let Some(row) = rows.next().map_err(|error| error.to_string())? {
+                let title_cipher: Vec<u8> = row.get(0).map_err(|error| error.to_string())?;
+                let content_cipher: Vec<u8> = row.get(1).map_err(|error| error.to_string())?;
+                decrypt_text(key, &title_cipher)
+                    .map_err(|_| "Backup local key does not match its note data.".to_string())?;
+                decrypt_text(key, &content_cipher)
+                    .map_err(|_| "Backup local key does not match its note data.".to_string())?;
+            }
+        }
+
+        Ok(note_count)
+    })();
+
+    let _ = fs::remove_file(&validation_path);
+    result
+}
+
+fn validate_restore_payload(
+    app: &tauri::AppHandle,
+    mut payload: BackupPayload,
+) -> Result<ValidatedRestore, String> {
+    let security_bytes = BASE64
+        .decode(&payload.security_json)
+        .map_err(|_| "Backup security metadata is invalid.".to_string())?;
+    let config: SecurityConfig = serde_json::from_slice(&security_bytes)
+        .map_err(|_| "Backup security metadata is invalid.".to_string())?;
+
+    if config.enabled
+        && (config.password_hash.is_none()
+            || config.kdf_salt.is_none()
+            || config.wrapped_master_key.is_none())
+    {
+        return Err("Password-protected backup has incomplete security metadata.".into());
+    }
+
+    let database_bytes = BASE64
+        .decode(&payload.database)
+        .map_err(|_| "Backup database payload is invalid.".to_string())?;
+
+    let local_key = if config.enabled {
+        if payload.local_key.is_some() {
+            return Err("Password-protected backup unexpectedly contains a local key.".into());
+        }
+        None
+    } else {
+        let encoded = payload
+            .local_key
+            .as_deref()
+            .ok_or_else(|| "Passwordless backup is missing its local encryption key.".to_string())?;
+        let key = BASE64
+            .decode(encoded)
+            .map_err(|_| "Backup local encryption key is invalid.".to_string())?;
+        if key.len() != MASTER_KEY_LEN {
+            return Err("Backup local encryption key has an invalid length.".into());
+        }
+        Some(Zeroizing::new(key))
+    };
+
+    if let Some(value) = payload.local_key.as_mut() {
+        value.zeroize();
+    }
+
+    let note_count = validate_database_bytes(
+        app,
+        &database_bytes,
+        local_key.as_ref().map(|value| value.as_slice()),
+    )?;
+
+    Ok(ValidatedRestore {
+        security_bytes,
+        database_bytes,
+        local_key,
+        password_enabled: config.enabled,
+        note_count,
+    })
+}
+
+fn rollback_dataset_files(
+    database_path: &Path,
+    security_path: &Path,
+    local_key_path: &Path,
+    previous_database: &Path,
+    previous_security: &Path,
+    previous_local_key: &Path,
+    moved_database: bool,
+    moved_security: bool,
+    moved_local_key: bool,
+) {
+    let _ = fs::remove_file(database_path);
+    let _ = fs::remove_file(security_path);
+    let _ = fs::remove_file(local_key_path);
+
+    if moved_database {
+        let _ = fs::rename(previous_database, database_path);
+    }
+    if moved_security {
+        let _ = fs::rename(previous_security, security_path);
+    }
+    if moved_local_key {
+        let _ = fs::rename(previous_local_key, local_key_path);
+    }
+}
+
+fn install_restored_dataset(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    restore: &ValidatedRestore,
+) -> Result<(), String> {
+    let app_dir = app_data_dir(app)?;
+    let token = Uuid::new_v4().to_string();
+    let database_path = database_path(app)?;
+    let security_path = security_config_path(app)?;
+    let local_key_path = local_key_path(app)?;
+
+    let stage_database = app_dir.join(format!(".restore-new-{token}.db"));
+    let stage_security = app_dir.join(format!(".restore-new-{token}.security"));
+    let stage_local_key = app_dir.join(format!(".restore-new-{token}.key"));
+
+    let previous_database = app_dir.join(format!(".restore-prev-{token}.db"));
+    let previous_security = app_dir.join(format!(".restore-prev-{token}.security"));
+    let previous_local_key = app_dir.join(format!(".restore-prev-{token}.key"));
+
+    write_private_file(&stage_database, &restore.database_bytes)?;
+    if let Err(error) = write_private_file(&stage_security, &restore.security_bytes) {
+        let _ = fs::remove_file(&stage_database);
+        return Err(error);
+    }
+    if let Some(key) = restore.local_key.as_ref() {
+        if let Err(error) = write_private_file(&stage_local_key, key.as_slice()) {
+            let _ = fs::remove_file(&stage_database);
+            let _ = fs::remove_file(&stage_security);
+            return Err(error);
+        }
+    }
+
+    close_sticky_windows_for_dataset_switch(app);
+
+    let checkpoint_result = (|| {
+        if database_path.exists() {
+            let connection = open_database(app)?;
+            connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .map_err(|error| error.to_string())?;
+            drop(connection);
+        }
+        Ok::<(), String>(())
+    })();
+
+    if let Err(error) = checkpoint_result {
+        let _ = fs::remove_file(&stage_database);
+        let _ = fs::remove_file(&stage_security);
+        let _ = fs::remove_file(&stage_local_key);
+        return Err(error);
+    }
+
+    let _ = fs::remove_file(sqlite_sidecar_path(&database_path, "-wal"));
+    let _ = fs::remove_file(sqlite_sidecar_path(&database_path, "-shm"));
+
+    let mut moved_database = false;
+    let mut moved_security = false;
+    let mut moved_local_key = false;
+
+    if database_path.exists() {
+        if let Err(error) = fs::rename(&database_path, &previous_database) {
+            let _ = fs::remove_file(&stage_database);
+            let _ = fs::remove_file(&stage_security);
+            let _ = fs::remove_file(&stage_local_key);
+            return Err(error.to_string());
+        }
+        moved_database = true;
+    }
+
+    if security_path.exists() {
+        if let Err(error) = fs::rename(&security_path, &previous_security) {
+            if moved_database {
+                let _ = fs::rename(&previous_database, &database_path);
+            }
+            let _ = fs::remove_file(&stage_database);
+            let _ = fs::remove_file(&stage_security);
+            let _ = fs::remove_file(&stage_local_key);
+            return Err(error.to_string());
+        }
+        moved_security = true;
+    }
+
+    if local_key_path.exists() {
+        if let Err(error) = fs::rename(&local_key_path, &previous_local_key) {
+            if moved_database {
+                let _ = fs::rename(&previous_database, &database_path);
+            }
+            if moved_security {
+                let _ = fs::rename(&previous_security, &security_path);
+            }
+            let _ = fs::remove_file(&stage_database);
+            let _ = fs::remove_file(&stage_security);
+            let _ = fs::remove_file(&stage_local_key);
+            return Err(error.to_string());
+        }
+        moved_local_key = true;
+    }
+
+    let install_result = (|| {
+        fs::rename(&stage_database, &database_path).map_err(|error| error.to_string())?;
+        fs::rename(&stage_security, &security_path).map_err(|error| error.to_string())?;
+        if restore.local_key.is_some() {
+            fs::rename(&stage_local_key, &local_key_path).map_err(|error| error.to_string())?;
+        }
+        Ok::<(), String>(())
+    })();
+
+    if let Err(error) = install_result {
+        rollback_dataset_files(
+            &database_path,
+            &security_path,
+            &local_key_path,
+            &previous_database,
+            &previous_security,
+            &previous_local_key,
+            moved_database,
+            moved_security,
+            moved_local_key,
+        );
+        let _ = fs::remove_file(&stage_database);
+        let _ = fs::remove_file(&stage_security);
+        let _ = fs::remove_file(&stage_local_key);
+        return Err(format!("Restore could not replace the current data: {error}"));
+    }
+
+    if let Err(error) = clear_master_key(state) {
+        rollback_dataset_files(
+            &database_path,
+            &security_path,
+            &local_key_path,
+            &previous_database,
+            &previous_security,
+            &previous_local_key,
+            moved_database,
+            moved_security,
+            moved_local_key,
+        );
+        return Err(error);
+    }
+
+    let _ = fs::remove_file(&previous_database);
+    let _ = fs::remove_file(&previous_security);
+    let _ = fs::remove_file(&previous_local_key);
+    let _ = fs::remove_file(&stage_local_key);
+
+    Ok(())
+}
+
+fn load_portable_notes(
+    app: &tauri::AppHandle,
+    state: &AppState,
+) -> Result<Vec<PortableNote>, String> {
+    let key = current_master_key(state)?;
+    let connection = open_database(app)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT title_cipher, content_cipher, color, note_type, pinned, created_at, updated_at
+             FROM notes
+             ORDER BY pinned DESC, updated_at DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let mut rows = statement.query([]).map_err(|error| error.to_string())?;
+    let mut notes = Vec::new();
+
+    while let Some(row) = rows.next().map_err(|error| error.to_string())? {
+        let title_cipher: Vec<u8> = row.get(0).map_err(|error| error.to_string())?;
+        let content_cipher: Vec<u8> = row.get(1).map_err(|error| error.to_string())?;
+        notes.push(PortableNote {
+            title: decrypt_text(&key, &title_cipher)?,
+            content: decrypt_text(&key, &content_cipher)?,
+            color: row.get(2).map_err(|error| error.to_string())?,
+            note_type: row.get(3).map_err(|error| error.to_string())?,
+            pinned: row.get::<_, i64>(4).map_err(|error| error.to_string())? != 0,
+            created_at: row.get(5).map_err(|error| error.to_string())?,
+            updated_at: row.get(6).map_err(|error| error.to_string())?,
+        });
+    }
+
+    Ok(notes)
+}
+
+#[tauri::command]
+async fn create_encrypted_backup(
+    app: tauri::AppHandle,
+    mut backup_password: String,
+) -> Result<Option<DataFileResult>, String> {
+    let result = (|| {
+        let state = app.state::<AppState>();
+        let _active_key = current_master_key(state.inner())?;
+        ensure_backup_password(&backup_password)?;
+
+        let Some(selected) = app
+            .dialog()
+            .file()
+            .set_title("Create encrypted StickyFlow backup")
+            .add_filter("StickyFlow backup", &["stickyflow-backup"])
+            .blocking_save_file()
+        else {
+            return Ok(None);
+        };
+
+        let path = ensure_file_extension(
+            selected
+                .into_path()
+                .map_err(|_| "Selected backup path is not a local file path.".to_string())?,
+            "stickyflow-backup",
+        );
+
+        let (bytes, note_count) = build_backup_envelope(&app, &backup_password)?;
+        write_private_file(&path, &bytes)?;
+
+        Ok(Some(DataFileResult {
+            path: path.to_string_lossy().into_owned(),
+            note_count,
+        }))
+    })();
+
+    backup_password.zeroize();
+    result
+}
+
+#[tauri::command]
+async fn restore_encrypted_backup(
+    app: tauri::AppHandle,
+    mut backup_password: String,
+) -> Result<Option<RestoreResult>, String> {
+    let result = (|| {
+        let state = app.state::<AppState>();
+        let _active_key = current_master_key(state.inner())?;
+        ensure_backup_password(&backup_password)?;
+
+        let Some(selected) = app
+            .dialog()
+            .file()
+            .set_title("Restore encrypted StickyFlow backup")
+            .add_filter("StickyFlow backup", &["stickyflow-backup"])
+            .blocking_pick_file()
+        else {
+            return Ok(None);
+        };
+
+        let path = selected
+            .into_path()
+            .map_err(|_| "Selected backup path is not a local file path.".to_string())?;
+        let bytes = read_file_with_limit(&path, MAX_BACKUP_FILE_BYTES)?;
+        let payload = decrypt_backup_payload(&backup_password, &bytes)?;
+        let validated = validate_restore_payload(&app, payload)?;
+
+        let note_count = validated.note_count;
+        let password_enabled = validated.password_enabled;
+        install_restored_dataset(&app, state.inner(), &validated)?;
+
+        Ok(Some(RestoreResult {
+            note_count,
+            password_enabled,
+        }))
+    })();
+
+    backup_password.zeroize();
+    result
+}
+
+#[tauri::command]
+async fn export_plaintext_json(
+    app: tauri::AppHandle,
+) -> Result<Option<DataFileResult>, String> {
+    let state = app.state::<AppState>();
+    let notes = load_portable_notes(&app, state.inner())?;
+
+    let Some(selected) = app
+        .dialog()
+        .file()
+        .set_title("Export decrypted StickyFlow notes")
+        .add_filter("JSON", &["json"])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+
+    let path = ensure_file_extension(
+        selected
+            .into_path()
+            .map_err(|_| "Selected export path is not a local file path.".to_string())?,
+        "json",
+    );
+
+    let note_count = i64::try_from(notes.len()).map_err(|error| error.to_string())?;
+    let export = PlaintextExport {
+        format: PLAINTEXT_EXPORT_FORMAT.to_string(),
+        version: PLAINTEXT_EXPORT_VERSION,
+        exported_at: now_millis()?,
+        warning: "PLAINTEXT: note titles and contents in this file are not encrypted.".to_string(),
+        notes,
+    };
+    let bytes = serde_json::to_vec_pretty(&export).map_err(|error| error.to_string())?;
+    write_private_file(&path, &bytes)?;
+
+    Ok(Some(DataFileResult {
+        path: path.to_string_lossy().into_owned(),
+        note_count,
+    }))
+}
+
+#[tauri::command]
+async fn import_plaintext_json(
+    app: tauri::AppHandle,
+) -> Result<Option<ImportFileResult>, String> {
+    let state = app.state::<AppState>();
+    let key = current_master_key(state.inner())?;
+
+    let Some(selected) = app
+        .dialog()
+        .file()
+        .set_title("Import StickyFlow plaintext JSON")
+        .add_filter("JSON", &["json"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+
+    let path = selected
+        .into_path()
+        .map_err(|_| "Selected import path is not a local file path.".to_string())?;
+    let bytes = read_file_with_limit(&path, MAX_IMPORT_FILE_BYTES)?;
+    let export: PlaintextExport = serde_json::from_slice(&bytes)
+        .map_err(|_| "Selected file is not a valid StickyFlow plaintext export.".to_string())?;
+
+    if export.format != PLAINTEXT_EXPORT_FORMAT || export.version != PLAINTEXT_EXPORT_VERSION {
+        return Err("Unsupported StickyFlow plaintext export format or version.".into());
+    }
+    if export.notes.len() > MAX_IMPORT_NOTES {
+        return Err(format!(
+            "Import contains too many notes (maximum {}).",
+            MAX_IMPORT_NOTES
+        ));
+    }
+
+    for note in &export.notes {
+        validate_note_fields(&note.title, &note.content, &note.color, &note.note_type)?;
+    }
+
+    let mut connection = open_database(&app)?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let now = now_millis()?;
+
+    for note in &export.notes {
+        let id = Uuid::new_v4().to_string();
+        let title_cipher = encrypt_text(&key, &note.title)?;
+        let content_cipher = encrypt_text(&key, &note.content)?;
+        let created_at = if note.created_at > 0 { note.created_at } else { now };
+        let updated_at = if note.updated_at >= created_at {
+            note.updated_at
+        } else {
+            created_at
+        };
+
+        transaction
+            .execute(
+                "INSERT INTO notes
+                 (id, title_cipher, content_cipher, color, note_type, pinned, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    id,
+                    title_cipher,
+                    content_cipher,
+                    &note.color,
+                    &note.note_type,
+                    if note.pinned { 1 } else { 0 },
+                    created_at,
+                    updated_at
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    Ok(Some(ImportFileResult {
+        path: path.to_string_lossy().into_owned(),
+        imported: i64::try_from(export.notes.len()).map_err(|error| error.to_string())?,
+    }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2098,6 +2882,7 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 // StickyFlow persists sticky/chip geometry in SQLite.
@@ -2111,6 +2896,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             autostart_status,
             set_autostart_enabled,
+            create_encrypted_backup,
+            restore_encrypted_backup,
+            export_plaintext_json,
+            import_plaintext_json,
             security_status,
             setup_password,
             skip_password_setup,
