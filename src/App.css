@@ -441,3 +441,18 @@ button:disabled {
   font-size: 0.9rem;
   font-weight: 600;
 }
+
+
+/* Snippet cards */
+
+.snippet-card .note-main p {
+  font-family:
+    "JetBrains Mono",
+    "Fira Code",
+    "Ubuntu Mono",
+    ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
+  white-space: pre-wrap;
+}

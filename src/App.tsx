@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import "./App.css";
 
 type View = "loading" | "setup" | "locked" | "workspace";
@@ -73,6 +74,7 @@ function App() {
     useState<ChipSettings>(defaultChipSettings);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState("");
+  const [copiedNoteId, setCopiedNoteId] = useState<string | null>(null);
 
   useEffect(() => {
     void initializeSecurity();
@@ -299,6 +301,33 @@ function App() {
         },
       });
       setNotes((current) => sortNotes(current.map((item) => (item.id === updated.id ? updated : item))));
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
+  }
+
+  async function copySnippet(note: Note) {
+    if (
+      view !== "workspace" ||
+      note.noteType !== "snippet"
+    ) {
+      return;
+    }
+
+    setError("");
+
+    try {
+      // Intentionally copy the exact stored content:
+      // no trim, no newline conversion.
+      await writeText(note.content);
+
+      setCopiedNoteId(note.id);
+
+      window.setTimeout(() => {
+        setCopiedNoteId((current) =>
+          current === note.id ? null : current,
+        );
+      }, 1400);
     } catch (cause) {
       setError(toMessage(cause));
     }
@@ -697,7 +726,12 @@ function App() {
           ) : (
             <div className="note-list">
               {notes.map((note) => (
-                <article className={`note-card note-${note.color}`} key={note.id}>
+                <article
+                  className={`note-card note-${note.color} ${
+                    note.noteType === "snippet" ? "snippet-card" : ""
+                  }`}
+                  key={note.id}
+                >
                   <button className="note-main" onClick={() => editNote(note)} type="button">
                     <div className="note-card-topline">
                       <span className="note-type">{note.noteType}</span>
@@ -708,6 +742,19 @@ function App() {
                     <time>{formatDate(note.updatedAt)}</time>
                   </button>
                   <div className="note-actions">
+                    {note.noteType === "snippet" && (
+                      <button
+                        className="icon-button"
+                        onClick={() => void copySnippet(note)}
+                        title="Copy full snippet"
+                        type="button"
+                      >
+                        {copiedNoteId === note.id
+                          ? "Copied ✓"
+                          : "Copy"}
+                      </button>
+                    )}
+
                     <button className="icon-button" onClick={() => void openSticky(note)} type="button">
                       Sticky
                     </button>

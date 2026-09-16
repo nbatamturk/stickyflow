@@ -251,3 +251,142 @@ body:has(.sticky-chip) {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+
+
+/* Snippet presentation */
+
+.sticky-snippet-content {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--sticky-border);
+  border-radius: 8px;
+  background: rgba(20, 20, 20, 0.08);
+  font-family:
+    "JetBrains Mono",
+    "Fira Code",
+    "Ubuntu Mono",
+    ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Compact expanded-sticky toolbar */
+
+.sticky-shell {
+  position: relative;
+}
+
+.sticky-header {
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.sticky-title-block {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.sticky-title-block h1 {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.sticky-actions {
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.72;
+  transition: opacity 120ms ease;
+}
+
+.sticky-shell:hover .sticky-actions,
+.sticky-actions:focus-within {
+  opacity: 1;
+}
+
+.sticky-actions button {
+  box-sizing: border-box;
+  height: 26px;
+  min-height: 26px;
+  padding: 0 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.sticky-actions .sticky-icon-action {
+  display: inline-grid;
+  width: 26px;
+  min-width: 26px;
+  padding: 0;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.sticky-actions .sticky-icon-action:hover,
+.sticky-actions .sticky-icon-action.is-active {
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.sticky-actions .sticky-icon-action.is-success {
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.sticky-actions .sticky-close-action:hover {
+  background: rgba(150, 35, 35, 0.14);
+}
+
+.sticky-copy-status {
+  position: absolute;
+  top: 49px;
+  right: 16px;
+  z-index: 10;
+  padding: 3px 7px;
+  border: 1px solid var(--sticky-border);
+  border-radius: 6px;
+  background: var(--sticky-bg);
+  font-size: 10px;
+  font-weight: 800;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.09);
+  pointer-events: none;
+}
+
+@media (max-width: 320px) {
+  .sticky-shell {
+    padding: 12px;
+  }
+
+  .sticky-header {
+    gap: 5px;
+  }
+
+  .sticky-actions {
+    gap: 2px;
+  }
+
+  .sticky-actions .sticky-icon-action {
+    width: 23px;
+    min-width: 23px;
+    height: 23px;
+    min-height: 23px;
+    font-size: 12px;
+  }
+
+  .sticky-header h1 {
+    font-size: 16px;
+  }
+
+  .sticky-copy-status {
+    top: 43px;
+    right: 12px;
+  }
+}
