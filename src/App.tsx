@@ -80,6 +80,12 @@ function App() {
     useState<ChipSettings>(defaultChipSettings);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [passwordChangeBusy, setPasswordChangeBusy] = useState(false);
+  const [passwordChangeError, setPasswordChangeError] = useState("");
+  const [passwordChangeMessage, setPasswordChangeMessage] = useState("");
   const [copiedNoteId, setCopiedNoteId] = useState<string | null>(null);
   const contentTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const lastCopiedTextRef = useRef<string | null>(null);
@@ -97,6 +103,7 @@ function App() {
       setDraft(emptyDraft);
       setEditorOpen(false);
       setSettingsOpen(false);
+      resetPasswordChangeForm();
     }
   }, [view]);
 
@@ -261,6 +268,7 @@ function App() {
       await invoke("lock_session");
       await clearOwnedClipboardIfUnchanged();
       clearPasswordFields();
+      resetPasswordChangeForm();
       setNotes([]);
       setDraft(emptyDraft);
       setEditorOpen(false);
@@ -548,6 +556,56 @@ function App() {
     }
   }
 
+  async function handleChangePassword(event: FormEvent) {
+    event.preventDefault();
+    setPasswordChangeError("");
+    setPasswordChangeMessage("");
+
+    if (newPassword.length < 8) {
+      setPasswordChangeError("New password must be at least 8 characters.");
+      return;
+    }
+
+    if (newPassword !== confirmNewPassword) {
+      setPasswordChangeError("New passwords do not match.");
+      return;
+    }
+
+    if (currentPassword === newPassword) {
+      setPasswordChangeError("New password must be different from the current password.");
+      return;
+    }
+
+    setPasswordChangeBusy(true);
+
+    try {
+      await invoke("change_password", {
+        currentPassword,
+        newPassword,
+      });
+
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmNewPassword("");
+      setPasswordChangeMessage(
+        "Password changed. Your current session stays unlocked until you lock or exit StickyFlow.",
+      );
+    } catch (cause) {
+      setPasswordChangeError(toMessage(cause));
+    } finally {
+      setPasswordChangeBusy(false);
+    }
+  }
+
+  function resetPasswordChangeForm() {
+    setCurrentPassword("");
+    setNewPassword("");
+    setConfirmNewPassword("");
+    setPasswordChangeError("");
+    setPasswordChangeMessage("");
+    setPasswordChangeBusy(false);
+  }
+
   function clearPasswordFields() {
     setPassword("");
     setConfirmPassword("");
@@ -664,12 +722,20 @@ function App() {
           <h1>StickyFlow</h1>
         </div>
         <div className="topbar-actions">
-          <span className="status-pill">{lockEnabled ? "Encrypted + locked" : "Encrypted local mode"}</span>
+          <span className="status-pill">{lockEnabled ? "Encrypted + password lock" : "Encrypted local mode"}</span>
           <button
             className="ghost-button small-button"
             onClick={() => {
-              setSettingsOpen((current) => !current);
+              setSettingsOpen((current) => {
+                const next = !current;
+                if (!next) {
+                  resetPasswordChangeForm();
+                }
+                return next;
+              });
               setSettingsMessage("");
+              setPasswordChangeError("");
+              setPasswordChangeMessage("");
             }}
             type="button"
           >
@@ -684,174 +750,281 @@ function App() {
       </header>
 
       {settingsOpen && (
-        <section className="chip-settings-panel">
+        <section className="chip-settings-panel settings-panel">
           <div className="section-heading">
             <div>
-              <p className="eyebrow">STICKY APPEARANCE</p>
-              <h3>Compact chip</h3>
+              <p className="eyebrow">SETTINGS</p>
+              <h3>StickyFlow preferences</h3>
             </div>
             <button
               className="icon-button"
-              onClick={() => setSettingsOpen(false)}
+              onClick={() => {
+                setSettingsOpen(false);
+                resetPasswordChangeForm();
+                setSettingsMessage("");
+              }}
               type="button"
             >
               Close
             </button>
           </div>
 
-          <form
-            className="chip-settings-form"
-            onSubmit={saveChipSettings}
-          >
-            <label className="chip-setting-toggle">
-              <input
-                checked={chipSettings.autoWidth}
-                onChange={(event) => {
-                  const checked = event.currentTarget.checked;
-                  setChipSettings((current) => ({
-                    ...current,
-                    autoWidth: checked,
-                  }));
-                }}
-                type="checkbox"
-              />
-              Auto width from title
-            </label>
-
-            <div className="chip-settings-grid">
-              <label>
-                Fixed width
-                <div className="px-input">
-                  <input
-                    disabled={chipSettings.autoWidth}
-                    max={640}
-                    min={48}
-                    onChange={(event) => {
-                      const value = Number(event.currentTarget.value);
-                      setChipSettings((current) => ({
-                        ...current,
-                        fixedWidth: value,
-                      }));
-                    }}
-                    type="number"
-                    value={chipSettings.fixedWidth}
-                  />
-                  <span>px</span>
-                </div>
-              </label>
-
-              <label>
-                Height
-                <div className="px-input">
-                  <input
-                    max={64}
-                    min={20}
-                    onChange={(event) => {
-                      const value = Number(event.currentTarget.value);
-                      setChipSettings((current) => ({
-                        ...current,
-                        height: value,
-                      }));
-                    }}
-                    type="number"
-                    value={chipSettings.height}
-                  />
-                  <span>px</span>
-                </div>
-              </label>
-
-              <label>
-                Min width
-                <div className="px-input">
-                  <input
-                    max={480}
-                    min={48}
-                    onChange={(event) => {
-                      const value = Number(event.currentTarget.value);
-                      setChipSettings((current) => ({
-                        ...current,
-                        minWidth: value,
-                      }));
-                    }}
-                    type="number"
-                    value={chipSettings.minWidth}
-                  />
-                  <span>px</span>
-                </div>
-              </label>
-
-              <label>
-                Max width
-                <div className="px-input">
-                  <input
-                    max={640}
-                    min={48}
-                    onChange={(event) => {
-                      const value = Number(event.currentTarget.value);
-                      setChipSettings((current) => ({
-                        ...current,
-                        maxWidth: value,
-                      }));
-                    }}
-                    type="number"
-                    value={chipSettings.maxWidth}
-                  />
-                  <span>px</span>
-                </div>
-              </label>
-
-              <label>
-                Font size
-                <div className="px-input">
-                  <input
-                    max={24}
-                    min={8}
-                    onChange={(event) => {
-                      const value = Number(event.currentTarget.value);
-                      setChipSettings((current) => ({
-                        ...current,
-                        fontSize: value,
-                      }));
-                    }}
-                    type="number"
-                    value={chipSettings.fontSize}
-                  />
-                  <span>px</span>
-                </div>
-              </label>
+          <div className="settings-card">
+            <div className="settings-card-heading">
+              <div>
+                <p className="eyebrow">STICKY APPEARANCE</p>
+                <h4>Compact chip</h4>
+              </div>
+              <span className="settings-badge">Display</span>
             </div>
 
-            <p className="muted chip-settings-hint">
-              Auto width measures the rendered GTK title.
-              Turn it off to force every compact chip to the
-              exact Fixed width.
-            </p>
+            <form
+              className="chip-settings-form"
+              onSubmit={saveChipSettings}
+            >
+              <label className="chip-setting-toggle">
+                <input
+                  checked={chipSettings.autoWidth}
+                  onChange={(event) => {
+                    const checked = event.currentTarget.checked;
+                    setChipSettings((current) => ({
+                      ...current,
+                      autoWidth: checked,
+                    }));
+                  }}
+                  type="checkbox"
+                />
+                Auto width from title
+              </label>
 
-            {settingsMessage && (
-              <p className="settings-success">
-                {settingsMessage}
+              <div className="chip-settings-grid">
+                <label>
+                  Fixed width
+                  <div className="px-input">
+                    <input
+                      disabled={chipSettings.autoWidth}
+                      max={640}
+                      min={48}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setChipSettings((current) => ({
+                          ...current,
+                          fixedWidth: value,
+                        }));
+                      }}
+                      type="number"
+                      value={chipSettings.fixedWidth}
+                    />
+                    <span>px</span>
+                  </div>
+                </label>
+
+                <label>
+                  Height
+                  <div className="px-input">
+                    <input
+                      max={64}
+                      min={20}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setChipSettings((current) => ({
+                          ...current,
+                          height: value,
+                        }));
+                      }}
+                      type="number"
+                      value={chipSettings.height}
+                    />
+                    <span>px</span>
+                  </div>
+                </label>
+
+                <label>
+                  Min width
+                  <div className="px-input">
+                    <input
+                      max={480}
+                      min={48}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setChipSettings((current) => ({
+                          ...current,
+                          minWidth: value,
+                        }));
+                      }}
+                      type="number"
+                      value={chipSettings.minWidth}
+                    />
+                    <span>px</span>
+                  </div>
+                </label>
+
+                <label>
+                  Max width
+                  <div className="px-input">
+                    <input
+                      max={640}
+                      min={48}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setChipSettings((current) => ({
+                          ...current,
+                          maxWidth: value,
+                        }));
+                      }}
+                      type="number"
+                      value={chipSettings.maxWidth}
+                    />
+                    <span>px</span>
+                  </div>
+                </label>
+
+                <label>
+                  Font size
+                  <div className="px-input">
+                    <input
+                      max={24}
+                      min={8}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setChipSettings((current) => ({
+                          ...current,
+                          fontSize: value,
+                        }));
+                      }}
+                      type="number"
+                      value={chipSettings.fontSize}
+                    />
+                    <span>px</span>
+                  </div>
+                </label>
+              </div>
+
+              <p className="muted chip-settings-hint">
+                Auto width measures the rendered GTK title.
+                Turn it off to force every compact chip to the
+                exact Fixed width.
               </p>
-            )}
 
-            <div className="chip-settings-actions">
-              <button
-                className="primary-button"
-                disabled={settingsBusy}
-                type="submit"
-              >
-                {settingsBusy ? "Saving…" : "Save settings"}
-              </button>
+              {settingsMessage && (
+                <p className="settings-success">
+                  {settingsMessage}
+                </p>
+              )}
 
-              <button
-                className="ghost-button"
-                disabled={settingsBusy}
-                onClick={() => void resetChipSettings()}
-                type="button"
-              >
-                Reset defaults
-              </button>
+              <div className="chip-settings-actions">
+                <button
+                  className="primary-button"
+                  disabled={settingsBusy}
+                  type="submit"
+                >
+                  {settingsBusy ? "Saving…" : "Save appearance"}
+                </button>
+
+                <button
+                  className="ghost-button"
+                  disabled={settingsBusy}
+                  onClick={() => void resetChipSettings()}
+                  type="button"
+                >
+                  Reset defaults
+                </button>
+              </div>
+            </form>
+          </div>
+
+          {lockEnabled ? (
+            <div className="settings-card security-settings-card">
+              <div className="settings-card-heading">
+                <div>
+                  <p className="eyebrow">SECURITY</p>
+                  <h4>Change password</h4>
+                </div>
+                <span className="settings-badge security-badge">Protected</span>
+              </div>
+
+              <p className="muted security-settings-copy">
+                Changing the password re-wraps the same encryption key. Your note ciphertext is not rewritten.
+              </p>
+
+              <form className="security-settings-form" noValidate onSubmit={handleChangePassword}>
+                <label>
+                  Current password
+                  <input
+                    autoComplete="current-password"
+                    onChange={(event) => setCurrentPassword(event.currentTarget.value)}
+                    placeholder="Current StickyFlow password"
+                    type="password"
+                    value={currentPassword}
+                  />
+                </label>
+
+                <div className="security-password-grid">
+                  <label>
+                    New password
+                    <input
+                      autoComplete="new-password"
+                      minLength={8}
+                      onChange={(event) => setNewPassword(event.currentTarget.value)}
+                      placeholder="At least 8 characters"
+                      type="password"
+                      value={newPassword}
+                    />
+                  </label>
+
+                  <label>
+                    Confirm new password
+                    <input
+                      autoComplete="new-password"
+                      minLength={8}
+                      onChange={(event) => setConfirmNewPassword(event.currentTarget.value)}
+                      placeholder="Repeat new password"
+                      type="password"
+                      value={confirmNewPassword}
+                    />
+                  </label>
+                </div>
+
+                {passwordChangeError && (
+                  <p className="error-message">{passwordChangeError}</p>
+                )}
+
+                {passwordChangeMessage && (
+                  <p className="settings-success security-settings-success">
+                    {passwordChangeMessage}
+                  </p>
+                )}
+
+                <div className="security-settings-actions">
+                  <button
+                    className="primary-button"
+                    disabled={
+                      passwordChangeBusy ||
+                      currentPassword.length === 0 ||
+                      newPassword.length === 0 ||
+                      confirmNewPassword.length === 0
+                    }
+                    type="submit"
+                  >
+                    {passwordChangeBusy ? "Changing…" : "Change password"}
+                  </button>
+                </div>
+              </form>
             </div>
-          </form>
+          ) : (
+            <div className="settings-card security-settings-card">
+              <div className="settings-card-heading">
+                <div>
+                  <p className="eyebrow">SECURITY</p>
+                  <h4>Password lock</h4>
+                </div>
+                <span className="settings-badge">Local mode</span>
+              </div>
+              <p className="muted security-settings-copy">
+                Password lock is currently disabled. Enabling or disabling password protection will be handled as a separate security flow.
+              </p>
+            </div>
+          )}
         </section>
       )}
 
