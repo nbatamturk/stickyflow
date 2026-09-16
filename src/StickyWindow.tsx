@@ -1,9 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { LogicalSize } from "@tauri-apps/api/dpi";
+import { parseSnippetParts } from "./snippetBlocks";
 import "./StickyWindow.css";
 
 type Note = {
@@ -33,12 +35,41 @@ export default function StickyWindow({ noteId, mode }: Props) {
   const [opacity, setOpacity] = useState(100);
   const [opacityOpen, setOpacityOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedBlock, setCopiedBlock] = useState<number | null>(null);
   const chipTitleRef = useRef<HTMLElement | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     void loadNote();
   }, [noteId]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen<string>(
+      "stickyflow-note-updated",
+      (event) => {
+        if (
+          event.payload === noteId &&
+          !editing
+        ) {
+          void loadNote();
+        }
+      },
+    ).then((stop) => {
+      if (disposed) {
+        stop();
+      } else {
+        unlisten = stop;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [noteId, editing]);
 
   useEffect(() => {
     const currentWindow = getCurrentWindow();
@@ -133,6 +164,14 @@ export default function StickyWindow({ noteId, mode }: Props) {
       setNote(loaded);
       setOpacity(loadedOpacity);
       setEditTitle(loaded.title);
+
+      try {
+        await getCurrentWindow().setTitle(
+          loaded.title,
+        );
+      } catch {
+        // Visible note content is already synchronized.
+      }
       setEditContent(loaded.content);
       setEditing(false);
     } catch (cause) {
@@ -245,6 +284,26 @@ export default function StickyWindow({ noteId, mode }: Props) {
 
       window.setTimeout(() => {
         setCopied(false);
+      }, 1400);
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
+  }
+
+  async function copySnippetBlock(
+    content: string,
+    blockIndex: number,
+  ) {
+    setError("");
+
+    try {
+      await writeText(content);
+      setCopiedBlock(blockIndex);
+
+      window.setTimeout(() => {
+        setCopiedBlock((current) =>
+          current === blockIndex ? null : current,
+        );
       }, 1400);
     } catch (cause) {
       setError(toMessage(cause));
@@ -553,7 +612,55 @@ export default function StickyWindow({ noteId, mode }: Props) {
               : ""
           }`}
         >
-          {note.content || <em>Empty note</em>}
+          {note.noteType === "snippet" ? (
+            note.content ? (
+              parseSnippetParts(note.content).map(
+                (part, partIndex) =>
+                  part.type === "code" ? (
+                    <div
+                      className="sticky-code-block"
+                      key={`code-${part.index}-${partIndex}`}
+                    >
+                      <div className="sticky-code-header">
+                        <span>
+                          {part.language || "code"}
+                        </span>
+
+                        <button
+                          onClick={() =>
+                            void copySnippetBlock(
+                              part.content,
+                              part.index,
+                            )
+                          }
+                          title="Copy this code block"
+                          type="button"
+                        >
+                          {copiedBlock === part.index
+                            ? "Copied ✓"
+                            : "Copy"}
+                        </button>
+                      </div>
+
+                      <pre>
+                        <code>{part.content}</code>
+                      </pre>
+                    </div>
+                  ) : (
+                    <span
+                      className="sticky-snippet-text"
+                      key={`text-${partIndex}`}
+                    >
+                      {part.content}
+                    </span>
+                  ),
+              )
+            ) : (
+              <em>Empty snippet</em>
+            )
+          ) : (
+            note.content || <em>Empty note</em>
+          )}
         </section>
       )}
     </main>

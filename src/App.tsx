@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import "./App.css";
 
@@ -90,6 +91,33 @@ function App() {
       setEditorOpen(false);
       setSettingsOpen(false);
     }
+  }, [view]);
+
+  useEffect(() => {
+    if (view !== "workspace") {
+      return;
+    }
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen<string>(
+      "stickyflow-note-updated",
+      (event) => {
+        void syncChangedNote(event.payload);
+      },
+    ).then((stop) => {
+      if (disposed) {
+        stop();
+      } else {
+        unlisten = stop;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [view]);
 
   async function initializeSecurity() {
@@ -201,6 +229,51 @@ function App() {
       setError(toMessage(cause));
     } finally {
       setNotesLoading(false);
+    }
+  }
+
+  async function syncChangedNote(id: string) {
+    try {
+      const updated = await invoke<Note>(
+        "get_note",
+        { id },
+      );
+
+      setNotes((current) => {
+        const exists = current.some(
+          (note) => note.id === updated.id,
+        );
+
+        const next = exists
+          ? current.map((note) =>
+              note.id === updated.id
+                ? updated
+                : note,
+            )
+          : [updated, ...current];
+
+        return sortNotes(next);
+      });
+
+      // If this exact note is open in the Control Center editor,
+      // keep that editor in sync too.
+      setDraft((current) =>
+        current.id === updated.id
+          ? {
+              id: updated.id,
+              title: updated.title,
+              content: updated.content,
+              color: updated.color,
+              noteType: updated.noteType,
+              pinned: updated.pinned,
+            }
+          : current,
+      );
+    } catch (cause) {
+      console.warn(
+        "Could not synchronize changed note:",
+        cause,
+      );
     }
   }
 
