@@ -26,7 +26,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "deb",
+      "appimage"
+    ],
+    "category": "Productivity",
+    "shortDescription": "Secure local-first sticky notes and snippet manager",
+    "longDescription": "StickyFlow is a lightweight local-first desktop notes app with encrypted note storage, sticky windows, snippets, optional password lock, autostart, encrypted backups and plaintext portability tools.",
+    "homepage": "https://github.com/nbatamturk/stickyflow",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
