@@ -1,8 +1,13 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import {
+  readText,
+  writeText,
+} from "@tauri-apps/plugin-clipboard-manager";
+import { wrapCodeFence } from "./codeFence";
 import "./App.css";
+import "./SnippetTools.css";
 
 type View = "loading" | "setup" | "locked" | "workspace";
 type NoteType = "note" | "snippet" | "todo";
@@ -76,6 +81,8 @@ function App() {
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState("");
   const [copiedNoteId, setCopiedNoteId] = useState<string | null>(null);
+  const contentTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const lastCopiedTextRef = useRef<string | null>(null);
 
   useEffect(() => {
     void initializeSecurity();
@@ -119,6 +126,29 @@ function App() {
       unlisten?.();
     };
   }, [view]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen<string>(
+      "stickyflow-clipboard-owned",
+      (event) => {
+        lastCopiedTextRef.current = event.payload;
+      },
+    ).then((stop) => {
+      if (disposed) {
+        stop();
+      } else {
+        unlisten = stop;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   async function initializeSecurity() {
     try {
@@ -202,11 +232,34 @@ function App() {
     }
   }
 
+  async function clearOwnedClipboardIfUnchanged() {
+    const ownedText = lastCopiedTextRef.current;
+    lastCopiedTextRef.current = null;
+
+    if (ownedText === null) {
+      return;
+    }
+
+    try {
+      const currentClipboard = await readText();
+
+      if (currentClipboard === ownedText) {
+        await writeText("");
+      }
+    } catch (cause) {
+      // Clipboard cleanup must never prevent the security lock.
+      console.warn("Could not clean StickyFlow clipboard content:", cause);
+    }
+  }
+
   async function handleLockNow() {
     setBusy(true);
     setError("");
     try {
+      // Lock first. Clipboard cleanup is best-effort and must not delay
+      // dropping the in-memory master key or closing sticky windows.
       await invoke("lock_session");
+      await clearOwnedClipboardIfUnchanged();
       clearPasswordFields();
       setNotes([]);
       setDraft(emptyDraft);
@@ -255,8 +308,6 @@ function App() {
         return sortNotes(next);
       });
 
-      // If this exact note is open in the Control Center editor,
-      // keep that editor in sync too.
       setDraft((current) =>
         current.id === updated.id
           ? {
@@ -296,6 +347,33 @@ function App() {
     setError("");
   }
 
+  function insertCodeBlock() {
+    const textarea = contentTextareaRef.current;
+
+    if (!textarea || draft.noteType !== "snippet") {
+      return;
+    }
+
+    const edit = wrapCodeFence(
+      draft.content,
+      textarea.selectionStart,
+      textarea.selectionEnd,
+    );
+
+    setDraft((current) => ({
+      ...current,
+      content: edit.value,
+    }));
+
+    requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(
+        edit.selectionStart,
+        edit.selectionEnd,
+      );
+    });
+  }
+
   async function openSticky(note: Note) {
     setError("");
 
@@ -321,7 +399,13 @@ function App() {
             title,
           },
         });
-        setNotes((current) => sortNotes(current.map((note) => (note.id === updated.id ? updated : note))));
+        setNotes((current) =>
+          sortNotes(
+            current.map((note) =>
+              note.id === updated.id ? updated : note,
+            ),
+          ),
+        );
       } else {
         const created = await invoke<Note>("create_note", {
           input: {
@@ -373,7 +457,13 @@ function App() {
           pinned: !note.pinned,
         },
       });
-      setNotes((current) => sortNotes(current.map((item) => (item.id === updated.id ? updated : item))));
+      setNotes((current) =>
+        sortNotes(
+          current.map((item) =>
+            item.id === updated.id ? updated : item,
+          ),
+        ),
+      );
     } catch (cause) {
       setError(toMessage(cause));
     }
@@ -393,6 +483,7 @@ function App() {
       // Intentionally copy the exact stored content:
       // no trim, no newline conversion.
       await writeText(note.content);
+      lastCopiedTextRef.current = note.content;
 
       setCopiedNoteId(note.id);
 
@@ -894,13 +985,26 @@ function App() {
               </label>
 
               <label>
-                Content
+                <div className="snippet-editor-toolbar">
+                  <span>Content</span>
+                  {draft.noteType === "snippet" && (
+                    <button
+                      className="snippet-code-button"
+                      onClick={insertCodeBlock}
+                      title="Wrap selection in a fenced code block"
+                      type="button"
+                    >
+                      &lt;/&gt; Code block
+                    </button>
+                  )}
+                </div>
                 <textarea
                   onChange={(event) => {
                     const value = event.currentTarget.value;
                     setDraft((current) => ({ ...current, content: value }));
                   }}
                   placeholder="Write or paste anything…"
+                  ref={contentTextareaRef}
                   rows={12}
                   value={draft.content}
                 />
@@ -947,7 +1051,11 @@ function App() {
 }
 
 function sortNotes(notes: Note[]) {
-  return [...notes].sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt);
+  return [...notes].sort(
+    (a, b) =>
+      Number(b.pinned) - Number(a.pinned) ||
+      b.updatedAt - a.updatedAt,
+  );
 }
 
 function formatDate(timestamp: number) {

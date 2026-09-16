@@ -1,12 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { LogicalSize } from "@tauri-apps/api/dpi";
+import { wrapCodeFence } from "./codeFence";
 import { parseSnippetParts } from "./snippetBlocks";
 import "./StickyWindow.css";
+import "./SnippetTools.css";
 
 type Note = {
   id: string;
@@ -38,6 +40,7 @@ export default function StickyWindow({ noteId, mode }: Props) {
   const [copiedBlock, setCopiedBlock] = useState<number | null>(null);
   const chipTitleRef = useRef<HTMLElement | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const contentInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     void loadNote();
@@ -132,7 +135,6 @@ export default function StickyWindow({ noteId, mode }: Props) {
       const titleWidth =
         chipTitleRef.current?.getBoundingClientRect().width ?? 0;
 
-      // drag handle + paddings + chevron + borders
       const chromeWidth = 40;
 
       const width = Math.max(
@@ -142,9 +144,6 @@ export default function StickyWindow({ noteId, mode }: Props) {
 
       void (async () => {
         const size = new LogicalSize(width, 28);
-
-        // On Linux/Wry the embedded webview can retain its own default
-        // 200x200 bounds. Shrink the webview first, then its native window.
         await getCurrentWebview().setSize(size);
         await getCurrentWindow().setSize(size);
       })();
@@ -172,6 +171,7 @@ export default function StickyWindow({ noteId, mode }: Props) {
       } catch {
         // Visible note content is already synchronized.
       }
+
       setEditContent(loaded.content);
       setEditing(false);
     } catch (cause) {
@@ -192,8 +192,6 @@ export default function StickyWindow({ noteId, mode }: Props) {
     try {
       const currentWindow = getCurrentWindow();
 
-      // Sticky windows normally reject keyboard focus.
-      // Editing temporarily opts this one window into focus.
       await currentWindow.setFocusable(true);
       setEditing(true);
       await currentWindow.setFocus();
@@ -269,6 +267,39 @@ export default function StickyWindow({ noteId, mode }: Props) {
     }
   }
 
+  function insertCodeBlock() {
+    const textarea = contentInputRef.current;
+
+    if (!textarea || note?.noteType !== "snippet") {
+      return;
+    }
+
+    const edit = wrapCodeFence(
+      editContent,
+      textarea.selectionStart,
+      textarea.selectionEnd,
+    );
+
+    setEditContent(edit.value);
+
+    requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(
+        edit.selectionStart,
+        edit.selectionEnd,
+      );
+    });
+  }
+
+  async function notifyClipboardOwned(content: string) {
+    try {
+      await emit("stickyflow-clipboard-owned", content);
+    } catch (cause) {
+      // Copy already succeeded; ownership tracking is best-effort.
+      console.warn("Could not report StickyFlow clipboard ownership:", cause);
+    }
+  }
+
   async function copyFullSnippet() {
     if (!note || note.noteType !== "snippet") {
       return;
@@ -277,9 +308,8 @@ export default function StickyWindow({ noteId, mode }: Props) {
     setError("");
 
     try {
-      // Preserve multiline/code formatting exactly.
       await writeText(note.content);
-
+      await notifyClipboardOwned(note.content);
       setCopied(true);
 
       window.setTimeout(() => {
@@ -298,6 +328,7 @@ export default function StickyWindow({ noteId, mode }: Props) {
 
     try {
       await writeText(content);
+      await notifyClipboardOwned(content);
       setCopiedBlock(blockIndex);
 
       window.setTimeout(() => {
@@ -316,7 +347,6 @@ export default function StickyWindow({ noteId, mode }: Props) {
       Math.min(100, nextOpacity),
     );
 
-    // Update the expanded React sticky immediately.
     setOpacity(safeOpacity);
 
     try {
@@ -590,12 +620,26 @@ export default function StickyWindow({ noteId, mode }: Props) {
 
       {editing ? (
         <section className="sticky-quick-edit">
+          {note.noteType === "snippet" && (
+            <div className="sticky-snippet-edit-toolbar">
+              <button
+                className="snippet-code-button"
+                onClick={insertCodeBlock}
+                title="Wrap selection in a fenced code block"
+                type="button"
+              >
+                &lt;/&gt; Code block
+              </button>
+            </div>
+          )}
+
           <textarea
             className="sticky-edit-content"
             onChange={(event) => {
               const value = event.currentTarget.value;
               setEditContent(value);
             }}
+            ref={contentInputRef}
             spellCheck={false}
             value={editContent}
           />
