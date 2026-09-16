@@ -29,6 +29,8 @@ export default function StickyWindow({ noteId, mode }: Props) {
   const [editTitle, setEditTitle] = useState("");
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
+  const [opacity, setOpacity] = useState(100);
+  const [opacityOpen, setOpacityOpen] = useState(false);
   const chipTitleRef = useRef<HTMLElement | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -121,8 +123,13 @@ export default function StickyWindow({ noteId, mode }: Props) {
   async function loadNote() {
     try {
       setError("");
-      const loaded = await invoke<Note>("get_note", { id: noteId });
+      const [loaded, loadedOpacity] = await Promise.all([
+        invoke<Note>("get_note", { id: noteId }),
+        invoke<number>("get_sticky_opacity", { id: noteId }),
+      ]);
+
       setNote(loaded);
+      setOpacity(loadedOpacity);
       setEditTitle(loaded.title);
       setEditContent(loaded.content);
       setEditing(false);
@@ -137,6 +144,7 @@ export default function StickyWindow({ noteId, mode }: Props) {
     }
 
     setError("");
+    setOpacityOpen(false);
     setEditTitle(note.title);
     setEditContent(note.content);
 
@@ -220,6 +228,30 @@ export default function StickyWindow({ noteId, mode }: Props) {
     }
   }
 
+  async function changeOpacity(nextOpacity: number) {
+    const safeOpacity = Math.max(
+      40,
+      Math.min(100, nextOpacity),
+    );
+
+    // Update the expanded React sticky immediately.
+    setOpacity(safeOpacity);
+
+    try {
+      const saved = await invoke<number>(
+        "set_sticky_opacity",
+        {
+          id: noteId,
+          opacity: safeOpacity,
+        },
+      );
+
+      setOpacity(saved);
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
+  }
+
   async function switchMode(compact: boolean) {
     try {
       await invoke("set_sticky_compact", {
@@ -272,7 +304,9 @@ export default function StickyWindow({ noteId, mode }: Props) {
 
   if (mode === "chip") {
     return (
-      <main className={`sticky-chip sticky-${note.color}`}>
+      <main
+        className={`sticky-chip sticky-${note.color}`}
+      >
         <button
           className="sticky-chip-drag"
           onMouseDown={() => void startDragging()}
@@ -372,6 +406,16 @@ export default function StickyWindow({ noteId, mode }: Props) {
               </button>
 
               <button
+                onClick={() =>
+                  setOpacityOpen((current) => !current)
+                }
+                title="Opacity"
+                type="button"
+              >
+                ◐ {opacity}%
+              </button>
+
+              <button
                 onClick={() => void switchMode(true)}
                 title="Collapse"
                 type="button"
@@ -396,6 +440,27 @@ export default function StickyWindow({ noteId, mode }: Props) {
           )}
         </div>
       </header>
+
+      {opacityOpen && !editing && (
+        <div className="sticky-opacity-panel">
+          <span>Opacity</span>
+
+          <input
+            aria-label="Sticky opacity"
+            max={100}
+            min={40}
+            onChange={(event) => {
+              const value = Number(event.currentTarget.value);
+              void changeOpacity(value);
+            }}
+            step={5}
+            type="range"
+            value={opacity}
+          />
+
+          <strong>{opacity}%</strong>
+        </div>
+      )}
 
       {editing ? (
         <section className="sticky-quick-edit">

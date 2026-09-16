@@ -226,3 +226,28 @@ body:has(.sticky-chip) {
   opacity: 0.48;
   text-align: right;
 }
+
+
+/* Per-sticky opacity */
+
+.sticky-opacity-panel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 2px;
+  border-bottom: 1px solid var(--sticky-border);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.sticky-opacity-panel input[type="range"] {
+  flex: 1;
+  min-width: 60px;
+  cursor: pointer;
+}
+
+.sticky-opacity-panel strong {
+  min-width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

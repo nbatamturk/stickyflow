@@ -62,6 +62,7 @@ struct StickyPreferences {
     expanded_y: Option<i64>,
     expanded_width: i64,
     expanded_height: i64,
+    opacity: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -357,10 +358,11 @@ fn open_database(app: &tauri::AppHandle) -> Result<Connection, String> {
                         expanded_y INTEGER,
                         expanded_width INTEGER NOT NULL DEFAULT 360,
                         expanded_height INTEGER NOT NULL DEFAULT 320,
+                        opacity INTEGER NOT NULL DEFAULT 100,
                         created_at INTEGER NOT NULL,
                         updated_at INTEGER NOT NULL
                     );
-                    PRAGMA user_version = 4;
+                    PRAGMA user_version = 5;
                     ",
                 )
                 .map_err(|error| error.to_string())?;
@@ -378,7 +380,8 @@ fn open_database(app: &tauri::AppHandle) -> Result<Connection, String> {
                     ALTER TABLE notes ADD COLUMN expanded_y INTEGER;
                     ALTER TABLE notes ADD COLUMN expanded_width INTEGER NOT NULL DEFAULT 360;
                     ALTER TABLE notes ADD COLUMN expanded_height INTEGER NOT NULL DEFAULT 320;
-                    PRAGMA user_version = 4;
+                    ALTER TABLE notes ADD COLUMN opacity INTEGER NOT NULL DEFAULT 100;
+                    PRAGMA user_version = 5;
                     COMMIT;
                     ",
                 )
@@ -396,7 +399,8 @@ fn open_database(app: &tauri::AppHandle) -> Result<Connection, String> {
                     ALTER TABLE notes ADD COLUMN expanded_y INTEGER;
                     ALTER TABLE notes ADD COLUMN expanded_width INTEGER NOT NULL DEFAULT 360;
                     ALTER TABLE notes ADD COLUMN expanded_height INTEGER NOT NULL DEFAULT 320;
-                    PRAGMA user_version = 4;
+                    ALTER TABLE notes ADD COLUMN opacity INTEGER NOT NULL DEFAULT 100;
+                    PRAGMA user_version = 5;
                     COMMIT;
                     ",
                 )
@@ -411,13 +415,27 @@ fn open_database(app: &tauri::AppHandle) -> Result<Connection, String> {
                     ALTER TABLE notes ADD COLUMN compact_y INTEGER;
                     ALTER TABLE notes ADD COLUMN expanded_x INTEGER;
                     ALTER TABLE notes ADD COLUMN expanded_y INTEGER;
-                    PRAGMA user_version = 4;
+                    ALTER TABLE notes ADD COLUMN opacity INTEGER NOT NULL DEFAULT 100;
+                    PRAGMA user_version = 5;
                     COMMIT;
                     ",
                 )
                 .map_err(|error| error.to_string())?;
         }
-        4 => {}
+        4 => {
+            connection
+                .execute_batch(
+                    "
+                    BEGIN IMMEDIATE;
+                    ALTER TABLE notes
+                    ADD COLUMN opacity INTEGER NOT NULL DEFAULT 100;
+                    PRAGMA user_version = 5;
+                    COMMIT;
+                    ",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        5 => {}
         other => {
             return Err(format!(
                 "Unsupported StickyFlow database schema version: {other}"
@@ -704,7 +722,8 @@ fn load_sticky_preferences(app: &tauri::AppHandle, id: &str) -> Result<StickyPre
                 expanded_x,
                 expanded_y,
                 expanded_width,
-                expanded_height
+                expanded_height,
+                opacity
              FROM notes
              WHERE id = ?1",
             params![id],
@@ -717,6 +736,7 @@ fn load_sticky_preferences(app: &tauri::AppHandle, id: &str) -> Result<StickyPre
                     expanded_y: row.get(4)?,
                     expanded_width: row.get(5)?,
                     expanded_height: row.get(6)?,
+                    opacity: row.get(7)?,
                 })
             },
         )
@@ -742,6 +762,65 @@ fn apply_position(window: &tauri::WebviewWindow, x: Option<i64>, y: Option<i64>)
     }
 }
 
+fn apply_native_window_opacity(app: &tauri::AppHandle, label: &str, opacity: i64) {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(window) = app.get_window(label) {
+            if let Ok(gtk_window) = window.gtk_window() {
+                gtk_window.set_opacity(opacity.clamp(40, 100) as f64 / 100.0);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, label, opacity);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn install_expanded_opacity_map_handler(app: &tauri::AppHandle, note_id: &str, label: &str) {
+    let Some(native_window) = app.get_window(label) else {
+        return;
+    };
+
+    let Ok(gtk_window) = native_window.gtk_window() else {
+        return;
+    };
+
+    let app_for_map = app.clone();
+    let id_for_map = note_id.to_string();
+
+    gtk_window.connect_map_event(move |window, _| {
+        if let Ok(preferences) = load_sticky_preferences(&app_for_map, &id_for_map) {
+            let alpha = preferences.opacity.clamp(40, 100) as f64 / 100.0;
+
+            // Window is now genuinely mapped. Reapply the
+            // persisted opacity after WebKitGTK/XWayland remap.
+            window.set_opacity(alpha);
+
+            if let Some(gdk_window) = window.window() {
+                gdk_window.set_opaque_region(None);
+                gdk_window.set_opacity(alpha);
+            }
+
+            // One more pass on the next GTK loop iteration.
+            let window_retry = window.clone();
+
+            gtk::glib::idle_add_local_once(move || {
+                window_retry.set_opacity(alpha);
+
+                if let Some(gdk_window) = window_retry.window() {
+                    gdk_window.set_opaque_region(None);
+                    gdk_window.set_opacity(alpha);
+                }
+            });
+        }
+
+        gtk::glib::Propagation::Proceed
+    });
+}
+
 fn show_expanded_window(
     app: &tauri::AppHandle,
     note: &Note,
@@ -762,6 +841,10 @@ fn show_expanded_window(
         apply_position(&window, preferences.expanded_x, preferences.expanded_y);
 
         window.show().map_err(|error| error.to_string())?;
+
+        // Apply real native window opacity after the window is mapped.
+        apply_native_window_opacity(app, &label, preferences.opacity);
+
         return Ok(());
     }
 
@@ -785,9 +868,16 @@ fn show_expanded_window(
     .build()
     .map_err(|error| error.to_string())?;
 
+    #[cfg(target_os = "linux")]
+    install_expanded_opacity_map_handler(app, &note.id, &label);
+
     apply_position(&window, preferences.expanded_x, preferences.expanded_y);
 
     window.show().map_err(|error| error.to_string())?;
+
+    // WebView opacity must be applied at the native GTK window level.
+    apply_native_window_opacity(app, &label, preferences.opacity);
+
     Ok(())
 }
 
@@ -1100,6 +1190,7 @@ fn show_chip_window(
 
         if let Ok(gtk_window) = window.gtk_window() {
             gtk_window.resize(chip_width, settings.height);
+            gtk_window.set_opacity(preferences.opacity.clamp(40, 100) as f64 / 100.0);
         }
 
         if let (Some(x), Some(y)) = (preferences.compact_x, preferences.compact_y) {
@@ -1107,6 +1198,11 @@ fn show_chip_window(
         }
 
         window.show().map_err(|error| error.to_string())?;
+
+        // Re-apply after mapping; Mutter/XWayland can otherwise retain
+        // the previous native opacity state.
+        apply_native_window_opacity(app, &label, preferences.opacity);
+
         return Ok(());
     }
 
@@ -1130,6 +1226,7 @@ fn show_chip_window(
         .max_inner_size(builder_max_width as f64, settings.height as f64)
         .resizable(false)
         .decorations(false)
+        .transparent(true)
         .always_on_top(true)
         .skip_taskbar(true)
         .focused(false)
@@ -1141,6 +1238,8 @@ fn show_chip_window(
     let default_vbox = window.default_vbox().map_err(|error| error.to_string())?;
 
     let gtk_window = window.gtk_window().map_err(|error| error.to_string())?;
+
+    gtk_window.set_opacity(preferences.opacity.clamp(40, 100) as f64 / 100.0);
 
     let root_event = gtk::EventBox::new();
     root_event.set_visible_window(true);
@@ -1234,6 +1333,8 @@ fn show_chip_window(
     window.show().map_err(|error| error.to_string())?;
 
     gtk_window.resize(chip_width, settings.height);
+
+    apply_native_window_opacity(app, &label, preferences.opacity);
 
     if let (Some(x), Some(y)) = (preferences.compact_x, preferences.compact_y) {
         let _ = window.set_position(tauri::LogicalPosition::new(x as f64, y as f64));
@@ -1417,6 +1518,66 @@ fn save_sticky_geometry(
 ) -> Result<(), String> {
     let _key = current_master_key(&state)?;
     save_window_geometry(&app, &id, &mode)
+}
+
+#[tauri::command]
+fn get_sticky_opacity(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<i64, String> {
+    let _key = current_master_key(&state)?;
+    let connection = open_database(&app)?;
+
+    let opacity = connection
+        .query_row(
+            "SELECT opacity FROM notes WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| {
+            if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+                "Note not found.".to_string()
+            } else {
+                error.to_string()
+            }
+        })?;
+
+    Ok(opacity.clamp(40, 100))
+}
+
+#[tauri::command]
+fn set_sticky_opacity(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+    opacity: i64,
+) -> Result<i64, String> {
+    let _key = current_master_key(&state)?;
+    let opacity = opacity.clamp(40, 100);
+    let connection = open_database(&app)?;
+
+    let affected = connection
+        .execute(
+            "UPDATE notes
+             SET opacity = ?2
+             WHERE id = ?1",
+            params![&id, opacity],
+        )
+        .map_err(|error| error.to_string())?;
+
+    if affected == 0 {
+        return Err("Note not found.".into());
+    }
+
+    // Apply the value to both companion windows immediately.
+    // Expanded is a WebViewWindow, chip is a raw native Window,
+    // but both have an underlying GTK toplevel on Linux.
+    apply_native_window_opacity(&app, &sticky_expanded_label(&id), opacity);
+
+    apply_native_window_opacity(&app, &sticky_chip_label(&id), opacity);
+
+    Ok(opacity)
 }
 
 fn set_sticky_compact_inner(
@@ -1822,6 +1983,8 @@ pub fn run() {
             get_chip_settings,
             save_chip_settings,
             reset_chip_settings,
+            get_sticky_opacity,
+            set_sticky_opacity,
             save_sticky_geometry,
             create_note,
             update_note,
