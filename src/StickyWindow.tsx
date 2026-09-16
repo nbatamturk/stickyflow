@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import "./StickyWindow.css";
 
 type Note = {
@@ -16,12 +18,21 @@ type Note = {
 
 type Props = {
   noteId: string;
+  mode: "expanded" | "chip";
 };
 
-export default function StickyWindow({ noteId }: Props) {
+export default function StickyWindow({ noteId, mode }: Props) {
   const [note, setNote] = useState<Note | null>(null);
   const [error, setError] = useState("");
   const [alwaysOnTop, setAlwaysOnTop] = useState(true);
+  const [editing, setEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editContent, setEditContent] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [opacity, setOpacity] = useState(100);
+  const [opacityOpen, setOpacityOpen] = useState(false);
+  const chipTitleRef = useRef<HTMLElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     void loadNote();
@@ -31,51 +42,230 @@ export default function StickyWindow({ noteId }: Props) {
     const currentWindow = getCurrentWindow();
     let unlistenMoved: (() => void) | undefined;
     let unlistenResized: (() => void) | undefined;
-    let saveTimer: ReturnType<typeof setTimeout> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
 
-    const scheduleSave = () => {
-      if (saveTimer) {
-        clearTimeout(saveTimer);
+    const saveGeometry = () => {
+      if (timer) {
+        clearTimeout(timer);
       }
 
-      saveTimer = setTimeout(() => {
-        void invoke("save_sticky_window_state");
-      }, 150);
+      timer = setTimeout(() => {
+        void invoke("save_sticky_geometry", {
+          id: noteId,
+          mode,
+        });
+      }, 250);
     };
 
     void (async () => {
-      const moved = await currentWindow.onMoved(scheduleSave);
+      const moved = await currentWindow.onMoved(saveGeometry);
+
       if (disposed) {
         moved();
       } else {
         unlistenMoved = moved;
       }
 
-      const resized = await currentWindow.onResized(scheduleSave);
-      if (disposed) {
-        resized();
-      } else {
-        unlistenResized = resized;
+      if (mode === "expanded") {
+        const resized = await currentWindow.onResized(saveGeometry);
+
+        if (disposed) {
+          resized();
+        } else {
+          unlistenResized = resized;
+        }
       }
     })();
 
     return () => {
       disposed = true;
-      if (saveTimer) {
-        clearTimeout(saveTimer);
+
+      if (timer) {
+        clearTimeout(timer);
       }
+
       unlistenMoved?.();
       unlistenResized?.();
     };
-  }, []);
+  }, [noteId, mode]);
 
+  useLayoutEffect(() => {
+    if (mode !== "chip" || !note || !chipTitleRef.current) {
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      const titleWidth =
+        chipTitleRef.current?.getBoundingClientRect().width ?? 0;
+
+      // drag handle + paddings + chevron + borders
+      const chromeWidth = 40;
+
+      const width = Math.max(
+        64,
+        Math.min(200, Math.ceil(titleWidth + chromeWidth)),
+      );
+
+      void (async () => {
+        const size = new LogicalSize(width, 28);
+
+        // On Linux/Wry the embedded webview can retain its own default
+        // 200x200 bounds. Shrink the webview first, then its native window.
+        await getCurrentWebview().setSize(size);
+        await getCurrentWindow().setSize(size);
+      })();
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [mode, note?.title]);
 
   async function loadNote() {
     try {
       setError("");
-      const loaded = await invoke<Note>("get_note", { id: noteId });
+      const [loaded, loadedOpacity] = await Promise.all([
+        invoke<Note>("get_note", { id: noteId }),
+        invoke<number>("get_sticky_opacity", { id: noteId }),
+      ]);
+
       setNote(loaded);
+      setOpacity(loadedOpacity);
+      setEditTitle(loaded.title);
+      setEditContent(loaded.content);
+      setEditing(false);
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
+  }
+
+  async function startQuickEdit() {
+    if (!note || mode !== "expanded") {
+      return;
+    }
+
+    setError("");
+    setOpacityOpen(false);
+    setEditTitle(note.title);
+    setEditContent(note.content);
+
+    try {
+      const currentWindow = getCurrentWindow();
+
+      // Sticky windows normally reject keyboard focus.
+      // Editing temporarily opts this one window into focus.
+      await currentWindow.setFocusable(true);
+      setEditing(true);
+      await currentWindow.setFocus();
+
+      requestAnimationFrame(() => {
+        titleInputRef.current?.focus();
+        titleInputRef.current?.select();
+      });
+    } catch (cause) {
+      setEditing(false);
+      setError(toMessage(cause));
+
+      try {
+        await getCurrentWindow().setFocusable(false);
+      } catch {
+        // Preserve the original error.
+      }
+    }
+  }
+
+  async function returnToFocuslessMode() {
+    try {
+      await getCurrentWindow().setFocusable(false);
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
+  }
+
+  async function cancelQuickEdit() {
+    if (!note) {
+      return;
+    }
+
+    setEditTitle(note.title);
+    setEditContent(note.content);
+    setEditing(false);
+
+    await returnToFocuslessMode();
+  }
+
+  async function saveQuickEdit() {
+    if (!note || saving) {
+      return;
+    }
+
+    const title = editTitle.trim() || "Untitled";
+
+    setSaving(true);
+    setError("");
+
+    try {
+      const updated = await invoke<Note>("update_note", {
+        input: {
+          id: note.id,
+          title,
+          content: editContent,
+          color: note.color,
+          noteType: note.noteType,
+          pinned: note.pinned,
+        },
+      });
+
+      setNote(updated);
+      setEditTitle(updated.title);
+      setEditContent(updated.content);
+      setEditing(false);
+
+      await returnToFocuslessMode();
+    } catch (cause) {
+      setError(toMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function changeOpacity(nextOpacity: number) {
+    const safeOpacity = Math.max(
+      40,
+      Math.min(100, nextOpacity),
+    );
+
+    // Update the expanded React sticky immediately.
+    setOpacity(safeOpacity);
+
+    try {
+      const saved = await invoke<number>(
+        "set_sticky_opacity",
+        {
+          id: noteId,
+          opacity: safeOpacity,
+        },
+      );
+
+      setOpacity(saved);
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
+  }
+
+  async function switchMode(compact: boolean) {
+    try {
+      await invoke("set_sticky_compact", {
+        id: noteId,
+        compact,
+      });
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
+  }
+
+  async function startDragging() {
+    try {
+      await getCurrentWindow().startDragging();
     } catch (cause) {
       setError(toMessage(cause));
     }
@@ -104,9 +294,6 @@ export default function StickyWindow({ noteId }: Props) {
       <main className="sticky-shell sticky-error">
         <strong>StickyFlow</strong>
         <p>{error}</p>
-        <button onClick={() => void closeWindow()} type="button">
-          Close
-        </button>
       </main>
     );
   }
@@ -115,27 +302,187 @@ export default function StickyWindow({ noteId }: Props) {
     return <main className="sticky-shell">Decrypting note…</main>;
   }
 
+  if (mode === "chip") {
+    return (
+      <main
+        className={`sticky-chip sticky-${note.color}`}
+      >
+        <button
+          className="sticky-chip-drag"
+          onMouseDown={() => void startDragging()}
+          title="Move sticky"
+          type="button"
+        >
+          ⋮
+        </button>
+
+        <button
+          className="sticky-chip-open"
+          onClick={() => void switchMode(false)}
+          title={`Open ${note.title}`}
+          type="button"
+        >
+          <strong ref={chipTitleRef}>{note.title}</strong>
+          <span>›</span>
+        </button>
+      </main>
+    );
+  }
+
   return (
-    <main className={`sticky-shell sticky-${note.color}`}>
+    <main
+      className={`sticky-shell sticky-${note.color}`}
+      onKeyDown={(event) => {
+        if (!editing) {
+          return;
+        }
+
+        if (event.key === "Escape") {
+          event.preventDefault();
+          void cancelQuickEdit();
+          return;
+        }
+
+        if (
+          event.key === "Enter" &&
+          (event.ctrlKey || event.metaKey)
+        ) {
+          event.preventDefault();
+          void saveQuickEdit();
+        }
+      }}
+    >
       <header className="sticky-header">
-        <div>
+        <div className="sticky-title-block">
           <span>{note.noteType}</span>
-          <h1>{note.title}</h1>
+
+          {editing ? (
+            <input
+              className="sticky-edit-title"
+              maxLength={200}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                setEditTitle(value);
+              }}
+              ref={titleInputRef}
+              type="text"
+              value={editTitle}
+            />
+          ) : (
+            <h1>{note.title}</h1>
+          )}
         </div>
 
         <div className="sticky-actions">
-          <button onClick={() => void toggleAlwaysOnTop()} type="button">
-            {alwaysOnTop ? "Top ✓" : "Top"}
-          </button>
-          <button onClick={() => void closeWindow()} type="button">
-            ×
-          </button>
+          {editing ? (
+            <>
+              <button
+                className="sticky-save-button"
+                disabled={saving}
+                onClick={() => void saveQuickEdit()}
+                title="Save (Ctrl+Enter)"
+                type="button"
+              >
+                {saving ? "Saving…" : "Save"}
+              </button>
+
+              <button
+                disabled={saving}
+                onClick={() => void cancelQuickEdit()}
+                title="Cancel (Esc)"
+                type="button"
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                onClick={() => void startQuickEdit()}
+                title="Quick Edit"
+                type="button"
+              >
+                Edit
+              </button>
+
+              <button
+                onClick={() =>
+                  setOpacityOpen((current) => !current)
+                }
+                title="Opacity"
+                type="button"
+              >
+                ◐ {opacity}%
+              </button>
+
+              <button
+                onClick={() => void switchMode(true)}
+                title="Collapse"
+                type="button"
+              >
+                ▂
+              </button>
+
+              <button
+                onClick={() => void toggleAlwaysOnTop()}
+                type="button"
+              >
+                {alwaysOnTop ? "Top ✓" : "Top"}
+              </button>
+
+              <button
+                onClick={() => void closeWindow()}
+                type="button"
+              >
+                ×
+              </button>
+            </>
+          )}
         </div>
       </header>
 
-      <section className="sticky-content">
-        {note.content || <em>Empty note</em>}
-      </section>
+      {opacityOpen && !editing && (
+        <div className="sticky-opacity-panel">
+          <span>Opacity</span>
+
+          <input
+            aria-label="Sticky opacity"
+            max={100}
+            min={40}
+            onChange={(event) => {
+              const value = Number(event.currentTarget.value);
+              void changeOpacity(value);
+            }}
+            step={5}
+            type="range"
+            value={opacity}
+          />
+
+          <strong>{opacity}%</strong>
+        </div>
+      )}
+
+      {editing ? (
+        <section className="sticky-quick-edit">
+          <textarea
+            className="sticky-edit-content"
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setEditContent(value);
+            }}
+            spellCheck={false}
+            value={editContent}
+          />
+
+          <div className="sticky-edit-hint">
+            Ctrl+Enter save · Esc cancel
+          </div>
+        </section>
+      ) : (
+        <section className="sticky-content">
+          {note.content || <em>Empty note</em>}
+        </section>
+      )}
     </main>
   );
 }

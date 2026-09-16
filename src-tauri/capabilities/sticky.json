@@ -6,6 +6,11 @@
   "permissions": [
     "core:window:default",
     "core:window:allow-set-always-on-top",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-size",
+    "core:window:allow-set-focusable",
+    "core:window:allow-set-focus",
+    "core:webview:allow-set-webview-size",
     "core:window:allow-close"
   ]
 }

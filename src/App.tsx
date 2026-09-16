@@ -10,6 +10,15 @@ type SecurityStatus = {
   enabled: boolean;
 };
 
+type ChipSettings = {
+  autoWidth: boolean;
+  fixedWidth: number;
+  height: number;
+  minWidth: number;
+  maxWidth: number;
+  fontSize: number;
+};
+
 type Note = {
   id: string;
   title: string;
@@ -39,6 +48,15 @@ const emptyDraft: Draft = {
   pinned: false,
 };
 
+const defaultChipSettings: ChipSettings = {
+  autoWidth: true,
+  fixedWidth: 90,
+  height: 26,
+  minWidth: 60,
+  maxWidth: 180,
+  fontSize: 11,
+};
+
 function App() {
   const [view, setView] = useState<View>("loading");
   const [lockEnabled, setLockEnabled] = useState(false);
@@ -50,6 +68,11 @@ function App() {
   const [notesLoading, setNotesLoading] = useState(false);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [chipSettings, setChipSettings] =
+    useState<ChipSettings>(defaultChipSettings);
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [settingsMessage, setSettingsMessage] = useState("");
 
   useEffect(() => {
     void initializeSecurity();
@@ -58,10 +81,12 @@ function App() {
   useEffect(() => {
     if (view === "workspace") {
       void loadNotes();
+      void loadChipSettings();
     } else {
       setNotes([]);
       setDraft(emptyDraft);
       setEditorOpen(false);
+      setSettingsOpen(false);
     }
   }, [view]);
 
@@ -279,6 +304,57 @@ function App() {
     }
   }
 
+  async function loadChipSettings() {
+    try {
+      const loaded =
+        await invoke<ChipSettings>("get_chip_settings");
+
+      setChipSettings(loaded);
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
+  }
+
+  async function saveChipSettings(event: FormEvent) {
+    event.preventDefault();
+
+    setSettingsBusy(true);
+    setSettingsMessage("");
+    setError("");
+
+    try {
+      const saved =
+        await invoke<ChipSettings>("save_chip_settings", {
+          input: chipSettings,
+        });
+
+      setChipSettings(saved);
+      setSettingsMessage("Chip settings saved.");
+    } catch (cause) {
+      setError(toMessage(cause));
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
+  async function resetChipSettings() {
+    setSettingsBusy(true);
+    setSettingsMessage("");
+    setError("");
+
+    try {
+      const reset =
+        await invoke<ChipSettings>("reset_chip_settings");
+
+      setChipSettings(reset);
+      setSettingsMessage("Defaults restored.");
+    } catch (cause) {
+      setError(toMessage(cause));
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
   function clearPasswordFields() {
     setPassword("");
     setConfirmPassword("");
@@ -396,6 +472,16 @@ function App() {
         </div>
         <div className="topbar-actions">
           <span className="status-pill">{lockEnabled ? "Encrypted + locked" : "Encrypted local mode"}</span>
+          <button
+            className="ghost-button small-button"
+            onClick={() => {
+              setSettingsOpen((current) => !current);
+              setSettingsMessage("");
+            }}
+            type="button"
+          >
+            Settings
+          </button>
           {lockEnabled && (
             <button className="ghost-button small-button" disabled={busy} onClick={handleLockNow} type="button">
               Lock now
@@ -403,6 +489,178 @@ function App() {
           )}
         </div>
       </header>
+
+      {settingsOpen && (
+        <section className="chip-settings-panel">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">STICKY APPEARANCE</p>
+              <h3>Compact chip</h3>
+            </div>
+            <button
+              className="icon-button"
+              onClick={() => setSettingsOpen(false)}
+              type="button"
+            >
+              Close
+            </button>
+          </div>
+
+          <form
+            className="chip-settings-form"
+            onSubmit={saveChipSettings}
+          >
+            <label className="chip-setting-toggle">
+              <input
+                checked={chipSettings.autoWidth}
+                onChange={(event) => {
+                  const checked = event.currentTarget.checked;
+                  setChipSettings((current) => ({
+                    ...current,
+                    autoWidth: checked,
+                  }));
+                }}
+                type="checkbox"
+              />
+              Auto width from title
+            </label>
+
+            <div className="chip-settings-grid">
+              <label>
+                Fixed width
+                <div className="px-input">
+                  <input
+                    disabled={chipSettings.autoWidth}
+                    max={640}
+                    min={48}
+                    onChange={(event) => {
+                      const value = Number(event.currentTarget.value);
+                      setChipSettings((current) => ({
+                        ...current,
+                        fixedWidth: value,
+                      }));
+                    }}
+                    type="number"
+                    value={chipSettings.fixedWidth}
+                  />
+                  <span>px</span>
+                </div>
+              </label>
+
+              <label>
+                Height
+                <div className="px-input">
+                  <input
+                    max={64}
+                    min={20}
+                    onChange={(event) => {
+                      const value = Number(event.currentTarget.value);
+                      setChipSettings((current) => ({
+                        ...current,
+                        height: value,
+                      }));
+                    }}
+                    type="number"
+                    value={chipSettings.height}
+                  />
+                  <span>px</span>
+                </div>
+              </label>
+
+              <label>
+                Min width
+                <div className="px-input">
+                  <input
+                    max={480}
+                    min={48}
+                    onChange={(event) => {
+                      const value = Number(event.currentTarget.value);
+                      setChipSettings((current) => ({
+                        ...current,
+                        minWidth: value,
+                      }));
+                    }}
+                    type="number"
+                    value={chipSettings.minWidth}
+                  />
+                  <span>px</span>
+                </div>
+              </label>
+
+              <label>
+                Max width
+                <div className="px-input">
+                  <input
+                    max={640}
+                    min={48}
+                    onChange={(event) => {
+                      const value = Number(event.currentTarget.value);
+                      setChipSettings((current) => ({
+                        ...current,
+                        maxWidth: value,
+                      }));
+                    }}
+                    type="number"
+                    value={chipSettings.maxWidth}
+                  />
+                  <span>px</span>
+                </div>
+              </label>
+
+              <label>
+                Font size
+                <div className="px-input">
+                  <input
+                    max={24}
+                    min={8}
+                    onChange={(event) => {
+                      const value = Number(event.currentTarget.value);
+                      setChipSettings((current) => ({
+                        ...current,
+                        fontSize: value,
+                      }));
+                    }}
+                    type="number"
+                    value={chipSettings.fontSize}
+                  />
+                  <span>px</span>
+                </div>
+              </label>
+            </div>
+
+            <p className="muted chip-settings-hint">
+              Auto width measures the rendered GTK title.
+              Turn it off to force every compact chip to the
+              exact Fixed width.
+            </p>
+
+            {settingsMessage && (
+              <p className="settings-success">
+                {settingsMessage}
+              </p>
+            )}
+
+            <div className="chip-settings-actions">
+              <button
+                className="primary-button"
+                disabled={settingsBusy}
+                type="submit"
+              >
+                {settingsBusy ? "Saving…" : "Save settings"}
+              </button>
+
+              <button
+                className="ghost-button"
+                disabled={settingsBusy}
+                onClick={() => void resetChipSettings()}
+                type="button"
+              >
+                Reset defaults
+              </button>
+            </div>
+          </form>
+        </section>
+      )}
 
       <section className="hero-panel notes-hero">
         <div>

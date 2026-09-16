@@ -375,3 +375,69 @@ button:disabled {
     background: rgba(255, 255, 255, 0.04);
   }
 }
+
+
+/* Compact-chip settings */
+
+.chip-settings-panel {
+  margin: 0 0 18px;
+  padding: 20px;
+  border: 1px solid rgba(125, 115, 82, 0.22);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.chip-settings-form {
+  display: grid;
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.chip-setting-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: fit-content;
+}
+
+.chip-setting-toggle input {
+  width: auto;
+}
+
+.chip-settings-grid {
+  display: grid;
+  grid-template-columns:
+    repeat(auto-fit, minmax(140px, 1fr));
+  gap: 14px;
+}
+
+.px-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.px-input input {
+  width: 100%;
+}
+
+.px-input span {
+  color: var(--muted, #756f62);
+  font-size: 0.82rem;
+}
+
+.chip-settings-hint {
+  margin: 0;
+}
+
+.chip-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.settings-success {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
