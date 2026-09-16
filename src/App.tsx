@@ -947,7 +947,7 @@ function App() {
                 Changing the password re-wraps the same encryption key. Your note ciphertext is not rewritten.
               </p>
 
-              <form className="security-settings-form" onSubmit={handleChangePassword}>
+              <form className="security-settings-form" noValidate onSubmit={handleChangePassword}>
                 <label>
                   Current password
                   <input
