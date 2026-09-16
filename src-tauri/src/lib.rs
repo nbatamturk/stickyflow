@@ -21,7 +21,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use tauri::{window::WindowBuilder, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{window::WindowBuilder, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
@@ -1914,7 +1914,7 @@ fn update_note(
         )
         .map_err(|error| error.to_string())?;
 
-    Ok(Note {
+    let note = Note {
         id: input.id,
         title: input.title,
         content: input.content,
@@ -1923,7 +1923,25 @@ fn update_note(
         pinned: input.pinned,
         created_at,
         updated_at: now,
-    })
+    };
+
+    // If a native compact chip is currently alive, refresh its
+    // title/size immediately without opening a closed sticky.
+    let chip_label = sticky_chip_label(&note.id);
+
+    if app.get_window(&chip_label).is_some() {
+        if let Ok(preferences) = load_sticky_preferences(&app, &note.id) {
+            let _ = show_chip_window(&app, &note, &preferences);
+        }
+    }
+
+    // Only the note id crosses the event bus. Each UI retrieves
+    // the current decrypted value through the normal guarded command.
+    if let Err(error) = app.emit("stickyflow-note-updated", note.id.clone()) {
+        eprintln!("[stickyflow] note update event failed: {}", error);
+    }
+
+    Ok(note)
 }
 
 #[tauri::command]
@@ -1969,6 +1987,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             security_status,
             setup_password,

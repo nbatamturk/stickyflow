@@ -1,8 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { LogicalSize } from "@tauri-apps/api/dpi";
+import { parseSnippetParts } from "./snippetBlocks";
 import "./StickyWindow.css";
 
 type Note = {
@@ -31,12 +34,42 @@ export default function StickyWindow({ noteId, mode }: Props) {
   const [saving, setSaving] = useState(false);
   const [opacity, setOpacity] = useState(100);
   const [opacityOpen, setOpacityOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [copiedBlock, setCopiedBlock] = useState<number | null>(null);
   const chipTitleRef = useRef<HTMLElement | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     void loadNote();
   }, [noteId]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen<string>(
+      "stickyflow-note-updated",
+      (event) => {
+        if (
+          event.payload === noteId &&
+          !editing
+        ) {
+          void loadNote();
+        }
+      },
+    ).then((stop) => {
+      if (disposed) {
+        stop();
+      } else {
+        unlisten = stop;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [noteId, editing]);
 
   useEffect(() => {
     const currentWindow = getCurrentWindow();
@@ -131,6 +164,14 @@ export default function StickyWindow({ noteId, mode }: Props) {
       setNote(loaded);
       setOpacity(loadedOpacity);
       setEditTitle(loaded.title);
+
+      try {
+        await getCurrentWindow().setTitle(
+          loaded.title,
+        );
+      } catch {
+        // Visible note content is already synchronized.
+      }
       setEditContent(loaded.content);
       setEditing(false);
     } catch (cause) {
@@ -225,6 +266,47 @@ export default function StickyWindow({ noteId, mode }: Props) {
       setError(toMessage(cause));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function copyFullSnippet() {
+    if (!note || note.noteType !== "snippet") {
+      return;
+    }
+
+    setError("");
+
+    try {
+      // Preserve multiline/code formatting exactly.
+      await writeText(note.content);
+
+      setCopied(true);
+
+      window.setTimeout(() => {
+        setCopied(false);
+      }, 1400);
+    } catch (cause) {
+      setError(toMessage(cause));
+    }
+  }
+
+  async function copySnippetBlock(
+    content: string,
+    blockIndex: number,
+  ) {
+    setError("");
+
+    try {
+      await writeText(content);
+      setCopiedBlock(blockIndex);
+
+      window.setTimeout(() => {
+        setCopiedBlock((current) =>
+          current === blockIndex ? null : current,
+        );
+      }, 1400);
+    } catch (cause) {
+      setError(toMessage(cause));
     }
   }
 
@@ -397,41 +479,79 @@ export default function StickyWindow({ noteId, mode }: Props) {
             </>
           ) : (
             <>
+              {note.noteType === "snippet" && (
+                <button
+                  aria-label="Copy full snippet"
+                  className={`sticky-icon-action ${
+                    copied ? "is-success" : ""
+                  }`}
+                  onClick={() => void copyFullSnippet()}
+                  title={copied ? "Copied ✓" : "Copy full snippet"}
+                  type="button"
+                >
+                  {copied ? "✓" : "⧉"}
+                </button>
+              )}
+
               <button
+                aria-label="Quick Edit"
+                className="sticky-icon-action"
                 onClick={() => void startQuickEdit()}
                 title="Quick Edit"
                 type="button"
               >
-                Edit
+                ✎
               </button>
 
               <button
+                aria-label={`Opacity ${opacity}%`}
+                className={`sticky-icon-action ${
+                  opacityOpen ? "is-active" : ""
+                }`}
                 onClick={() =>
                   setOpacityOpen((current) => !current)
                 }
-                title="Opacity"
+                title={`Opacity: ${opacity}%`}
                 type="button"
               >
-                ◐ {opacity}%
+                ◐
               </button>
 
               <button
+                aria-label="Collapse to chip"
+                className="sticky-icon-action"
                 onClick={() => void switchMode(true)}
-                title="Collapse"
+                title="Collapse to chip"
                 type="button"
               >
                 ▂
               </button>
 
               <button
+                aria-label={
+                  alwaysOnTop
+                    ? "Disable always on top"
+                    : "Enable always on top"
+                }
+                className={`sticky-icon-action ${
+                  alwaysOnTop ? "is-active" : ""
+                }`}
                 onClick={() => void toggleAlwaysOnTop()}
+                title={
+                  alwaysOnTop
+                    ? "Always on top: On"
+                    : "Always on top: Off"
+                }
                 type="button"
               >
-                {alwaysOnTop ? "Top ✓" : "Top"}
+                ↑
               </button>
 
               <button
+                aria-label="Close sticky"
+                className="sticky-icon-action sticky-close-action"
                 onClick={() => void closeWindow()}
+                title="Close sticky"
                 type="button"
               >
                 ×
@@ -440,6 +560,12 @@ export default function StickyWindow({ noteId, mode }: Props) {
           )}
         </div>
       </header>
+
+      {copied && !editing && (
+        <div className="sticky-copy-status">
+          Copied ✓
+        </div>
+      )}
 
       {opacityOpen && !editing && (
         <div className="sticky-opacity-panel">
@@ -479,8 +605,62 @@ export default function StickyWindow({ noteId, mode }: Props) {
           </div>
         </section>
       ) : (
-        <section className="sticky-content">
-          {note.content || <em>Empty note</em>}
+        <section
+          className={`sticky-content ${
+            note.noteType === "snippet"
+              ? "sticky-snippet-content"
+              : ""
+          }`}
+        >
+          {note.noteType === "snippet" ? (
+            note.content ? (
+              parseSnippetParts(note.content).map(
+                (part, partIndex) =>
+                  part.type === "code" ? (
+                    <div
+                      className="sticky-code-block"
+                      key={`code-${part.index}-${partIndex}`}
+                    >
+                      <div className="sticky-code-header">
+                        <span>
+                          {part.language || "code"}
+                        </span>
+
+                        <button
+                          onClick={() =>
+                            void copySnippetBlock(
+                              part.content,
+                              part.index,
+                            )
+                          }
+                          title="Copy this code block"
+                          type="button"
+                        >
+                          {copiedBlock === part.index
+                            ? "Copied ✓"
+                            : "Copy"}
+                        </button>
+                      </div>
+
+                      <pre>
+                        <code>{part.content}</code>
+                      </pre>
+                    </div>
+                  ) : (
+                    <span
+                      className="sticky-snippet-text"
+                      key={`text-${partIndex}`}
+                    >
+                      {part.content}
+                    </span>
+                  ),
+              )
+            ) : (
+              <em>Empty snippet</em>
+            )
+          ) : (
+            note.content || <em>Empty note</em>
+          )}
         </section>
       )}
     </main>
