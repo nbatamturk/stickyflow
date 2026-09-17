@@ -667,8 +667,9 @@ fn change_password(
         // loaded in memory. The note ciphertext itself is intentionally not
         // touched by a password-only change.
         let stored_master_key = Zeroizing::new(
-            unwrap_master_key(&current_password, kdf_salt, wrapped_master_key)
-                .map_err(|_| "Current password is incorrect or security data is invalid.".to_string())?,
+            unwrap_master_key(&current_password, kdf_salt, wrapped_master_key).map_err(|_| {
+                "Current password is incorrect or security data is invalid.".to_string()
+            })?,
         );
 
         if stored_master_key.as_slice() != master_key.as_slice() {
@@ -2065,7 +2066,6 @@ fn delete_note(
     Ok(())
 }
 
-
 #[tauri::command]
 fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
     app.autolaunch()
@@ -2074,10 +2074,7 @@ fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn set_autostart_enabled(
-    app: tauri::AppHandle,
-    enabled: bool,
-) -> Result<bool, String> {
+fn set_autostart_enabled(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
     let manager = app.autolaunch();
 
     if enabled {
@@ -2086,12 +2083,8 @@ fn set_autostart_enabled(
         manager.disable().map_err(|error| error.to_string())?;
     }
 
-    manager
-        .is_enabled()
-        .map_err(|error| error.to_string())
+    manager.is_enabled().map_err(|error| error.to_string())
 }
-
-
 
 const BACKUP_FORMAT: &str = "stickyflow-backup";
 const BACKUP_VERSION: u32 = 1;
@@ -2228,10 +2221,7 @@ fn close_sticky_windows_for_dataset_switch(app: &tauri::AppHandle) {
 fn create_database_snapshot(app: &tauri::AppHandle) -> Result<(Vec<u8>, i64), String> {
     persist_open_sticky_geometry(app);
 
-    let snapshot_path = app_data_dir(app)?.join(format!(
-        ".backup-snapshot-{}.db",
-        Uuid::new_v4()
-    ));
+    let snapshot_path = app_data_dir(app)?.join(format!(".backup-snapshot-{}.db", Uuid::new_v4()));
     let _ = fs::remove_file(&snapshot_path);
 
     let result = (|| {
@@ -2264,8 +2254,7 @@ fn build_backup_envelope(
 
     let config = read_security_config(app)?
         .ok_or_else(|| "StickyFlow security is not configured.".to_string())?;
-    let security_bytes = fs::read(security_config_path(app)?)
-        .map_err(|error| error.to_string())?;
+    let security_bytes = fs::read(security_config_path(app)?).map_err(|error| error.to_string())?;
 
     let local_key = if config.enabled {
         None
@@ -2289,9 +2278,8 @@ fn build_backup_envelope(
         database: BASE64.encode(database_bytes),
     };
 
-    let payload_bytes = Zeroizing::new(
-        serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
-    );
+    let payload_bytes =
+        Zeroizing::new(serde_json::to_vec(&payload).map_err(|error| error.to_string())?);
     let salt = generate_random_bytes(KDF_SALT_LEN);
     let backup_key = derive_kek(backup_password, &salt)?;
     let encrypted_payload = encrypt_bytes(&backup_key, payload_bytes.as_slice())?;
@@ -2331,15 +2319,13 @@ fn decrypt_backup_payload(
         .decode(envelope.payload)
         .map_err(|_| "StickyFlow backup payload is invalid.".to_string())?;
     let backup_key = derive_kek(backup_password, &salt)?;
-    let plaintext = Zeroizing::new(
-        decrypt_bytes(&backup_key, &encrypted_payload).map_err(|_| {
+    let plaintext =
+        Zeroizing::new(decrypt_bytes(&backup_key, &encrypted_payload).map_err(|_| {
             "Backup password is incorrect or the backup file is corrupted.".to_string()
-        })?,
-    );
+        })?);
 
-    let payload: BackupPayload = serde_json::from_slice(plaintext.as_slice()).map_err(|_| {
-        "Backup password is incorrect or the backup file is corrupted.".to_string()
-    })?;
+    let payload: BackupPayload = serde_json::from_slice(plaintext.as_slice())
+        .map_err(|_| "Backup password is incorrect or the backup file is corrupted.".to_string())?;
 
     if payload.format != BACKUP_FORMAT || payload.version != BACKUP_VERSION {
         return Err("Unsupported StickyFlow backup payload version.".into());
@@ -2353,10 +2339,8 @@ fn validate_database_bytes(
     database_bytes: &[u8],
     local_key: Option<&[u8]>,
 ) -> Result<i64, String> {
-    let validation_path = app_data_dir(app)?.join(format!(
-        ".restore-validation-{}.db",
-        Uuid::new_v4()
-    ));
+    let validation_path =
+        app_data_dir(app)?.join(format!(".restore-validation-{}.db", Uuid::new_v4()));
     let _ = fs::remove_file(&validation_path);
 
     let result = (|| {
@@ -2367,7 +2351,9 @@ fn validate_database_bytes(
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
         if integrity != "ok" {
-            return Err(format!("Backup database integrity check failed: {integrity}"));
+            return Err(format!(
+                "Backup database integrity check failed: {integrity}"
+            ));
         }
 
         let schema_version: i64 = connection
@@ -2433,10 +2419,9 @@ fn validate_restore_payload(
         }
         None
     } else {
-        let encoded = payload
-            .local_key
-            .as_deref()
-            .ok_or_else(|| "Passwordless backup is missing its local encryption key.".to_string())?;
+        let encoded = payload.local_key.as_deref().ok_or_else(|| {
+            "Passwordless backup is missing its local encryption key.".to_string()
+        })?;
         let key = BASE64
             .decode(encoded)
             .map_err(|_| "Backup local encryption key is invalid.".to_string())?;
@@ -2613,7 +2598,9 @@ fn install_restored_dataset(
         let _ = fs::remove_file(&stage_database);
         let _ = fs::remove_file(&stage_security);
         let _ = fs::remove_file(&stage_local_key);
-        return Err(format!("Restore could not replace the current data: {error}"));
+        return Err(format!(
+            "Restore could not replace the current data: {error}"
+        ));
     }
 
     if let Err(error) = clear_master_key(state) {
@@ -2754,9 +2741,7 @@ async fn restore_encrypted_backup(
 }
 
 #[tauri::command]
-async fn export_plaintext_json(
-    app: tauri::AppHandle,
-) -> Result<Option<DataFileResult>, String> {
+async fn export_plaintext_json(app: tauri::AppHandle) -> Result<Option<DataFileResult>, String> {
     let state = app.state::<AppState>();
     let notes = load_portable_notes(&app, state.inner())?;
 
@@ -2795,9 +2780,7 @@ async fn export_plaintext_json(
 }
 
 #[tauri::command]
-async fn import_plaintext_json(
-    app: tauri::AppHandle,
-) -> Result<Option<ImportFileResult>, String> {
+async fn import_plaintext_json(app: tauri::AppHandle) -> Result<Option<ImportFileResult>, String> {
     let state = app.state::<AppState>();
     let key = current_master_key(state.inner())?;
 
@@ -2833,14 +2816,20 @@ async fn import_plaintext_json(
     }
 
     let mut connection = open_database(&app)?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let now = now_millis()?;
 
     for note in &export.notes {
         let id = Uuid::new_v4().to_string();
         let title_cipher = encrypt_text(&key, &note.title)?;
         let content_cipher = encrypt_text(&key, &note.content)?;
-        let created_at = if note.created_at > 0 { note.created_at } else { now };
+        let created_at = if note.created_at > 0 {
+            note.created_at
+        } else {
+            now
+        };
         let updated_at = if note.updated_at >= created_at {
             note.updated_at
         } else {
@@ -2876,6 +2865,16 @@ async fn import_plaintext_json(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    {
+        // GNOME Wayland does not reliably honor always-on-top for StickyFlow's
+        // sticky windows. Default Linux launches to X11/XWayland unless the
+        // user explicitly selected another GTK backend.
+        if std::env::var_os("GDK_BACKEND").is_none() {
+            std::env::set_var("GDK_BACKEND", "x11");
+        }
+    }
+
     tauri::Builder::default()
         .manage(AppState::default())
         .plugin(tauri_plugin_autostart::init(
