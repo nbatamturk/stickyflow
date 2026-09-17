@@ -27,9 +27,9 @@ StickyFlow defaults to GTK X11/XWayland on Linux so sticky always-on-top behavio
 
 Encrypted backups are protected by a separate backup password and include the data/security material needed for restore. Plaintext JSON export is intentionally decrypted and should be handled as sensitive data.
 
-## Known / deferred validation
+## Release validation
 
-The packaged autostart entry has been confirmed to point to `/usr/bin/stickyflow`. A full real logout/login autostart cycle with password-protected locked startup remains a manual validation item before the v0.1.0 release is closed.
+The Debian package and AppImage were manually validated on Ubuntu 22.04 amd64. Debian install/reinstall/uninstall behavior, retained user data, note/snippet/sticky flows, encrypted backup/restore, plaintext export/import and sticky always-on-top behavior passed. A real reboot/login autostart test also passed: StickyFlow started automatically in the locked state, exposed no sticky content before unlock, and restored sticky windows after successful password entry.
 
 ## Out of scope for v0.1.0
 
